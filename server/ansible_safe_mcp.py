@@ -419,9 +419,11 @@ def ask(cfg, title, text):
                            capture_output=True, timeout=600)
         return p.returncode == 0, 'approver command'
     if sys.platform == 'darwin':
+        # display alert is the native NSAlert (bold title, message, standard buttons); Deny is the default and
+        # the cancel button, so Return or Esc never approves by accident
         script = ['-e', 'on run argv',
-                  '-e', 'display dialog (item 1 of argv) with title (item 2 of argv) buttons {"Deny", "Approve"} '
-                        'default button "Deny" cancel button "Deny" giving up after 300 with icon caution',
+                  '-e', 'display alert (item 2 of argv) message (item 1 of argv) as warning buttons {"Deny", "Approve"} '
+                        'default button "Deny" cancel button "Deny" giving up after 300',
                   '-e', 'return button returned of result', '-e', 'end run']
         p = subprocess.run(['osascript'] + script + ['--', text[:2500], title[:120]], capture_output=True, text=True,
                            timeout=330)
@@ -851,7 +853,7 @@ class Server:
             warn = '\n\nWARNING: the look account can sudo without a password, so it is not read-only.'
         text = ('Add host %s\n\n%s port %d%s\nkind: %s\nlook account: %s\nchange account: %s\n\nHost key:\n%s%s' % (
             name, address, port, (' via ' + jump) if jump else '', kind, look_u, change_u, fp, warn))
-        ok, how = ask(self.cfg, 'ansible-safe-mcp: add a host', text)
+        ok, how = ask(self.cfg, 'Add %s to ansible-safe-mcp?' % name, text)
         if not ok:
             shutil.rmtree(d, ignore_errors=True)
             self.audit.write('hosts', summary='add %s declined (%s)' % (name, how))
@@ -1166,7 +1168,7 @@ class Server:
                     'connection.\n\n%s' % (rel, ', '.join(targets), h[:12],
                                           ('\nparams: ' + json.dumps(params)) if params else '',
                                           fmt_window(window), plan_text(plan)[:1800]))
-            ok, how = ask(self.cfg, 'ansible-safe-mcp: approve a playbook version', text)
+            ok, how = ask(self.cfg, 'Run %s on %s?' % (rel, ', '.join(targets)[:60]), text)
             asked = True
             if not ok:
                 self.audit.write('apply', summary='%s declined (%s)' % (rel, how), version=h[:12])
@@ -1240,7 +1242,7 @@ class Server:
                 '(window %s).\n\n%s' % (rel, ', '.join(targets), h[:12],
                                          ('\nparams: ' + json.dumps(params)) if params else '', fmt_window(window),
                                          plan_txt[:1800]))
-        ok, how = ask(self.cfg, 'ansible-safe-mcp: approve a playbook version', text)
+        ok, how = ask(self.cfg, 'Run %s on %s?' % (rel, ', '.join(targets)[:60]), text)
         if ok:
             self.approvals.add(h, rel, targets)
         return ok, True, how
@@ -1411,8 +1413,10 @@ class Server:
                         r['outcome'] = 'confirmed'
                         r['checks'] = e.get('checks')
                     else:
-                        r['outcome'] = 'reverted-now' if e.get('reverted') else 'not-confirmed'
-                        r['detail'] = e.get('msg')
+                        msg = str(e.get('msg', ''))
+                        r['outcome'] = ('reverted-now' if e.get('reverted') else
+                                        'reverted-by-host' if 'already reverted' in msg else 'not-confirmed')
+                        r['detail'] = msg
                         r['checks'] = e.get('checks')
                 else:
                     if e.get('status') == 'changed':
@@ -1474,6 +1478,7 @@ class Server:
             'confirmed': 'CONFIRMED: changed, checked over a fresh connection, kept',
             'not-confirmed': 'NOT CONFIRMED: the host will undo the change by itself',
             'reverted-now': 'REVERTED: the change failed or a check failed, and the host was put back now',
+            'reverted-by-host': 'REVERTED BY THE HOST: the window ran out before the change was confirmed',
             'not-armed': 'NOT ARMED: nothing was changed',
             'lost': 'SESSION LOST: the router undoes the change by itself',
             'unprotected': 'APPLIED, NOT PROTECTED: the router left Safe Mode on its own',

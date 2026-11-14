@@ -31,12 +31,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 import lint  # noqa: E402
+import routeros  # noqa: E402
 
 VERSION = '0.1.0'
 PROTOCOLS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05']
 NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$')
 ADDR_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9.:_-]{0,252}$')
-USER_RE = re.compile(r'^[a-z_][a-z0-9_.-]{0,31}$')
+USER_RE = re.compile(r'^[a-z_][a-z0-9_.-]{0,31}(\+[a-z0-9]{1,16})?$')
 PATTERN_RE = re.compile(r'^[A-Za-z0-9_.*:,!&\[\]-]{1,400}$')
 SAFE_STR = r'^[A-Za-z0-9 ._@:/+,=-]{0,200}$'
 KINDS = ('linux', 'routeros')
@@ -177,8 +178,8 @@ def save_inventory(cfg, inv):
     os.replace(tmp, cfg.inventory)
 
 
-HOST_KEYS = {'ansible_host', 'ansible_port', 'ansible_ssh_private_key_file', 'ansible_ssh_common_args',
-             'ansible_network_os', 'asm_kind', 'asm_look_user', 'asm_change_user', 'asm_jump'}
+HOST_KEYS = {'ansible_host', 'ansible_port', 'ansible_ssh_common_args', 'ansible_network_os', 'asm_kind',
+             'asm_look_user', 'asm_change_user', 'asm_jump', 'asm_look_key', 'asm_change_key'}
 
 
 def check_inventory(cfg):
@@ -255,7 +256,8 @@ def yaml_val(v):
 
 
 def write_vars(path, account, values=None):
-    lines = ['ansible_user: "{{ asm_%s_user }}"' % account]
+    lines = ['ansible_user: "{{ asm_%s_user }}"' % account,
+             'ansible_ssh_private_key_file: "{{ asm_%s_key | default(\'\') }}"' % account]
     for k, v in (values or {}).items():
         lines.append('%s: %s' % (k, yaml_val(v)))
     with open(path, 'w') as f:
@@ -620,6 +622,46 @@ def summarize_plan(doc):
     return hosts
 
 
+def routeros_commands(path):
+    """The commands a RouterOS playbook sends (raw or community.routeros.command), for the plan and the dialog."""
+    try:
+        with open(path) as f:
+            docs = yaml.load(f, Loader=lint.Loader) or []
+    except (OSError, yaml.YAMLError):
+        return []
+    out = []
+
+    def walk(tasks):
+        for t in tasks or []:
+            if not isinstance(t, dict):
+                continue
+            for key in ('block', 'rescue', 'always'):
+                walk(t.get(key))
+            for k, v in t.items():
+                sk = _short(k)
+                if sk == 'raw':
+                    out.append((t.get('name') or '', v if isinstance(v, str) else json.dumps(v)))
+                elif sk == 'command' and 'routeros' in k and isinstance(v, dict):
+                    for c in v.get('commands') or []:
+                        out.append((t.get('name') or '', str(c)))
+    for play in docs if isinstance(docs, list) else []:
+        if isinstance(play, dict):
+            for key in ('pre_tasks', 'tasks', 'post_tasks', 'handlers'):
+                walk(play.get(key))
+    return out
+
+
+def routeros_plan_text(path, targets):
+    cmds = routeros_commands(path)
+    lines = ['%s: under Safe Mode, %d command%s:' % (', '.join(targets), len(cmds), '' if len(cmds) == 1 else 's')]
+    for name, c in cmds[:60]:
+        lines.append('  > %s%s' % (c[:300], ('    # ' + name) if name else ''))
+    if len(cmds) > 40:
+        lines.append('  ! more than 40 commands: Safe Mode keeps 100 actions, then lets go without undoing; split it')
+    lines.append('  · RouterOS has no check mode: these are the commands as written, not a preview of the result')
+    return '\n'.join(lines)
+
+
 def plan_text(plan, stats=None):
     lines = []
     for h in sorted(plan):
@@ -734,6 +776,8 @@ class Server:
         look_u, change_u = a.get('look_user', ''), a.get('change_user', '')
         jump = a.get('proxy_jump') or ''
         key_file = a.get('key_file') or ''
+        look_key = a.get('look_key') or key_file
+        change_key = a.get('change_key') or key_file
         groups = a.get('groups') or []
         if not ADDR_RE.match(address) or address.startswith('-'):
             raise ToolError('address: a hostname or IP')
@@ -746,10 +790,11 @@ class Server:
             raise ToolError('the look account must not be root')
         if jump and not re.match(r'^[A-Za-z0-9_.@:-]{1,200}(,[A-Za-z0-9_.@:-]{1,200})*$', jump):
             raise ToolError('proxy_jump: user@host[:port][,...]')
-        if key_file:
-            key_file = os.path.expanduser(key_file)
-            if not os.path.isfile(key_file):
-                raise ToolError('key_file not found')
+        for label, kf in (('key_file', key_file), ('look_key', look_key), ('change_key', change_key)):
+            if kf and not os.path.isfile(os.path.expanduser(kf)):
+                raise ToolError('%s not found: %s' % (label, kf))
+        look_key = os.path.expanduser(look_key) if look_key else ''
+        change_key = os.path.expanduser(change_key) if change_key else ''
         if not all(isinstance(g, str) and NAME_RE.match(g) and g not in KINDS + ('all',) for g in groups):
             raise ToolError('groups: names of letters, digits, . _ -')
         # first contact: record the host key in a scratch file, show its fingerprint, ask
@@ -759,8 +804,8 @@ class Server:
                '-o', 'ConnectTimeout=15', '-p', str(port)]
         if jump:
             cmd += ['-J', jump]
-        if key_file:
-            cmd += ['-i', key_file, '-o', 'IdentitiesOnly=yes']
+        if look_key:
+            cmd += ['-i', look_key, '-o', 'IdentitiesOnly=yes']
         if kind == 'routeros':
             cmd += ['%s@%s' % (look_u, address), '/system identity print']
         else:
@@ -795,8 +840,10 @@ class Server:
         shutil.rmtree(d, ignore_errors=True)
         entry = {'ansible_host': address, 'ansible_port': port, 'asm_kind': kind, 'asm_look_user': look_u,
                  'asm_change_user': change_u}
-        if key_file:
-            entry['ansible_ssh_private_key_file'] = key_file
+        if look_key:
+            entry['asm_look_key'] = look_key
+        if change_key:
+            entry['asm_change_key'] = change_key
         if jump:
             entry['asm_jump'] = jump
             entry['ansible_ssh_common_args'] = '-o ProxyJump=%s' % jump
@@ -1041,6 +1088,15 @@ class Server:
     # ---- tool: plan
     def t_plan(self, a):
         path, rel, limit, params, targets = self._prepare(a)
+        kind = self._kind_of(targets)
+        if kind == 'routeros':
+            h = version_hash(self.cfg, rel, targets)
+            approved = self.approvals.approved(h, rel, targets)
+            self.audit.write('plan', summary='%s on %s' % (rel, ','.join(targets)), version=h[:12])
+            return '%s on %s\nversion %s: %s\n\n%s' % (
+                rel, ', '.join(targets), h[:12],
+                'approved before, apply runs without asking' if approved else 'not approved yet, apply will ask',
+                routeros_plan_text(path, targets))
         plan = self._plan(path, limit, params)
         h = version_hash(self.cfg, rel, targets)
         approved = self.approvals.approved(h, rel, targets)
@@ -1053,11 +1109,7 @@ class Server:
     # ---- tool: apply
     def t_apply(self, a):
         path, rel, limit, params, targets = self._prepare(a)
-        hs = hosts_of(load_inventory(self.cfg))
-        not_linux = [t for t in targets if hs[t].get('asm_kind', 'linux') != 'linux']
-        if not_linux:
-            raise ToolError('changes on %s are not supported yet: 0.1 guards Linux hosts. RouterOS comes next.' %
-                            ', '.join(not_linux))
+        kind = self._kind_of(targets)
         try:
             window = parse_window(a.get('window', '10m'))
         except ValueError as e:
@@ -1073,6 +1125,8 @@ class Server:
         for s in extra_services:
             if not isinstance(s, str) or not re.match(r'^[A-Za-z0-9@._-]{1,120}$', s):
                 raise ToolError('services: unit names')
+        if kind == 'routeros':
+            return self._apply_routeros(path, rel, params, targets, window, checks, a)
         plan = self._plan(path, limit, params)
         unreachable = [h for h in targets if (plan.get(h) or {}).get('unreachable')]
         if unreachable:
@@ -1143,6 +1197,149 @@ class Server:
         head = ('Approved by the user just now (version %s). ' % h[:12]) if asked else (
             'Version %s was approved before: ran without asking. ' % h[:12])
         return head + self._job_text(job_id)
+
+    def _kind_of(self, targets):
+        hs = hosts_of(load_inventory(self.cfg))
+        kinds = {hs[t].get('asm_kind', 'linux') for t in targets}
+        if len(kinds) > 1:
+            raise ToolError('one apply changes one kind of host; this one would touch %s. Use limit.' %
+                            ' and '.join(sorted(kinds)))
+        return kinds.pop()
+
+    def _approve(self, rel, targets, h, params, window, plan_txt):
+        if self.approvals.approved(h, rel, targets):
+            return True, False, ''
+        text = ('Run %s on %s\n\nversion %s%s\nIf the change can\'t be confirmed over a fresh connection it is undone '
+                '(window %s).\n\n%s' % (rel, ', '.join(targets), h[:12],
+                                         ('\nparams: ' + json.dumps(params)) if params else '', fmt_window(window),
+                                         plan_txt[:1800]))
+        ok, how = ask(self.cfg, 'ansible-safe-mcp: approve a playbook version', text)
+        if ok:
+            self.approvals.add(h, rel, targets)
+        return ok, True, how
+
+    def _apply_routeros(self, path, rel, params, targets, window, checks, a):
+        h = version_hash(self.cfg, rel, targets)
+        ok, asked, how = self._approve(rel, targets, h, params, window, routeros_plan_text(path, targets))
+        if not ok:
+            self.audit.write('apply', summary='%s declined (%s)' % (rel, how), version=h[:12])
+            return 'Not run: the user declined this playbook version (%s). Nothing changed.' % how
+        job_id = time.strftime('%m%d%H%M') + secrets.token_hex(2)
+        jd = os.path.join(self.cfg.jobs, job_id)
+        os.makedirs(jd, mode=0o700)
+        vf = os.path.join(jd, 'vars.yml')
+        write_vars(vf, 'change', params)
+        job = {'id': job_id, 'playbook': rel, 'targets': targets, 'version': h, 'params': params, 'window': window,
+               'started': time.time(), 'status': 'running', 'asked': asked, 'kind': 'routeros'}
+        self._save_job(job)
+        self.audit.write('apply', summary='%s on %s (job %s, Safe Mode)' % (rel, ','.join(targets), job_id),
+                         version=h[:12], asked=asked, params=params)
+        t = threading.Thread(target=self._run_routeros, args=(job_id, path, vf, targets, checks, window), daemon=True)
+        t.start()
+        t.join(timeout=max(0, min(int(a.get('wait_s', 80)), 110)))
+        head = ('Approved by the user just now (version %s). ' % h[:12]) if asked else (
+            'Version %s was approved before: ran without asking. ' % h[:12])
+        return head + self._job_text(job_id)
+
+    def _run_routeros(self, job_id, path, vf, targets, checks, window):
+        jd = os.path.join(self.cfg.jobs, job_id)
+        progress = os.path.join(jd, 'progress.log')
+
+        def note(msg):
+            with open(progress, 'a') as f:
+                f.write('%s %s\n' % (time.strftime('%H:%M:%S'), msg))
+        results = {}
+        hs = hosts_of(load_inventory(self.cfg))
+        kh = self.cfg.known_hosts
+        for host in targets:
+            hv = hs[host]
+            lu, cu = hv['asm_look_user'], hv['asm_change_user']
+            lk, ck = hv.get('asm_look_key'), hv.get('asm_change_key')
+            r = results[host] = {'outcome': 'unknown', 'changed': 0}
+            ok, before = routeros.run_command(hv, lu, kh, '/export terse', key=lk, timeout=120)
+            before = routeros.normalize_export(before) if ok else None
+            note('%s: export before %s' % (host, 'ok' if ok else 'FAILED'))
+            sess = routeros.SafeModeSession(routeros.ssh_base(hv, cu, kh, ck, tty=True))
+            try:
+                sess.open()
+            except Exception as e:
+                r.update(outcome='not-armed', detail='could not enter Safe Mode, so nothing was changed: %s' % e)
+                note('%s: %s' % (host, r['detail']))
+                continue
+            note('%s: Safe Mode held' % host)
+            deadline = time.time() + window
+            r['deadline'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(deadline))
+            stop = threading.Event()
+
+            def watchdog(sess=sess, stop=stop, host=host):
+                while not stop.wait(1):
+                    if time.time() >= deadline and sess.state == 'safe':
+                        note('%s: window over: Ctrl+D' % host)
+                        sess.revert()
+                        return
+            threading.Thread(target=watchdog, daemon=True).start()
+            doc, err, rc = run_playbook(self.cfg, path, vf, limit=host, timeout=window)
+            failed = None
+            for task in (doc or {}).get('tasks', []):
+                e = task.get('hosts', {}).get(host)
+                if not e:
+                    continue
+                if e.get('status') == 'changed' or (task['action'].endswith('raw') and e.get('status') == 'ok'):
+                    r['changed'] += 1
+                out = (e.get('stdout') or '') + (e.get('stderr') or '')
+                if e.get('status') in ('failed', 'unreachable') or routeros.ERROR.search(out):
+                    failed = '%s: %s' % (task['name'], (e.get('msg') or routeros.ANSI.sub('', out)).strip()[:400])
+                    break
+            if doc is None and not failed:
+                failed = 'ansible did not finish: %s' % err[-400:]
+            try:
+                in_safe = sess.probe()
+            except Exception:
+                in_safe = False
+            if sess.state == 'reverted':
+                r.update(outcome='reverted-now', detail='the window ran out before the change finished')
+            elif not in_safe and sess.exited:
+                r.update(outcome='lost', detail='the Safe Mode session dropped: the router undoes the change by '
+                                                'itself (at once, or after its TCP timeout of up to ~9 minutes)')
+            elif not in_safe:
+                r.update(outcome='unprotected', detail='the router left Safe Mode by itself (its history holds 100 '
+                                                       'actions): the change is applied and was NOT protected')
+                sess.kill()
+            elif failed:
+                sess.revert()
+                r.update(outcome='reverted-now', failed_task=failed.split(':', 1)[0],
+                         detail=failed + ' — undone (Ctrl+D)')
+            else:
+                fresh_ok, fresh = routeros.run_command(hv, lu, kh, '/system identity print', key=lk, timeout=30)
+                r['checks'] = [{'check': 'ssh', 'ok': fresh_ok, 'detail': 'fresh login as %s' % lu if fresh_ok
+                                else fresh.strip()[-200:]}]
+                bad = not fresh_ok
+                for c in checks:
+                    if c in ('ssh', 'ping') or bad:
+                        continue
+                    cok, cout = routeros.run_command(hv, cu, kh, c, key=ck, timeout=60)
+                    r['checks'].append({'check': c, 'ok': cok, 'detail': cout.strip()[-200:]})
+                    bad = bad or not cok
+                if bad:
+                    sess.revert()
+                    r.update(outcome='reverted-now', detail='a check failed after the change — undone (Ctrl+D)')
+                else:
+                    released = sess.commit()
+                    r.update(outcome='confirmed', released=released)
+            stop.set()
+            note('%s: %s' % (host, r['outcome']))
+            if before is not None:
+                ok, after = routeros.run_command(hv, lu, kh, '/export terse', key=lk, timeout=120)
+                if ok:
+                    import difflib as _d
+                    diff = list(_d.unified_diff(before.splitlines(), routeros.normalize_export(after).splitlines(),
+                                                'before', 'after', lineterm='', n=0))
+                    r['export_diff'] = '\n'.join(diff[:80]) if diff else '(no difference)'
+        job = self._load_job(job_id)
+        job.update(status='done', finished=time.time(), results=results)
+        self._save_job(job)
+        self.audit.write('job', summary='%s %s' % (job_id, ', '.join('%s=%s' % (h, r['outcome'])
+                                                                    for h, r in sorted(results.items()))))
 
     def _save_job(self, job):
         jd = os.path.join(self.cfg.jobs, job['id'])
@@ -1251,6 +1448,8 @@ class Server:
             'not-confirmed': 'NOT CONFIRMED: the host will undo the change by itself',
             'reverted-now': 'REVERTED: the change failed or a check failed, and the host was put back now',
             'not-armed': 'NOT ARMED: nothing was changed',
+            'lost': 'SESSION LOST: the router undoes the change by itself',
+            'unprotected': 'APPLIED, NOT PROTECTED: the router left Safe Mode on its own',
             'unknown': 'UNKNOWN: see the log',
         }
         for h, r in sorted(job.get('results', {}).items()):
@@ -1265,6 +1464,8 @@ class Server:
                 s += '\n    %s' % str(r['detail'])[:500]
             for c in r.get('checks') or []:
                 s += '\n    check %s: %s' % (c.get('check'), 'ok' if c.get('ok') else 'FAILED (%s)' % c.get('detail'))
+            if r.get('export_diff'):
+                s += '\n    config now vs before:\n' + '\n'.join('      ' + x for x in r['export_diff'].splitlines())
             lines.append(s)
         if job.get('error'):
             lines.append('Ansible error:\n' + job['error'][-1500:])
@@ -1294,6 +1495,9 @@ class Server:
                 job = self._load_job(job_id)
             return self._job_text(job_id)
         if action in ('extend', 'revert'):
+            if job.get('kind') == 'routeros':
+                raise ToolError('RouterOS changes are confirmed or undone within the apply itself (Safe Mode); there is '
+                                'no open window to extend or revert afterwards.')
             if action == 'extend':
                 try:
                     secs = parse_window(a.get('window', '10m'))
@@ -1373,6 +1577,8 @@ TOOLS = [
          'action': {'type': 'string', 'enum': ['list', 'add', 'test', 'remove']},
          'name': STR, 'address': STR, 'port': {'type': 'integer'}, 'kind': {'type': 'string', 'enum': list(KINDS)},
          'look_user': STR, 'change_user': STR, 'key_file': STR,
+         'look_key': {'type': 'string', 'description': 'key for the look account, if not key_file'},
+         'change_key': {'type': 'string', 'description': 'key for the change account, if not key_file'},
          'proxy_jump': {'type': 'string', 'description': 'user@jumphost[:port], for hosts behind a bastion'},
          'groups': {'type': 'array', 'items': STR}}, 'required': ['action']},
      'annotations': {'readOnlyHint': False, 'destructiveHint': False}},

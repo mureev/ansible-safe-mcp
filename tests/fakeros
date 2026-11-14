@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""A tiny RouterOS stand-in: exec commands change /tmp/fakeros/config; the console has Safe Mode (Ctrl+X),
+Ctrl+D undoes, /quit keeps, an abnormal end undoes."""
+import os, signal, sys, time, tty
+D = '/tmp/fakeros'; CFG = D + '/config'; SNAP = D + '/snap'
+os.makedirs(D, exist_ok=True); os.umask(0)
+if not os.path.exists(CFG): open(CFG, 'w').write('/ip address add address=192.168.88.1/24 interface=bridge\n')
+if os.path.exists(D + '/locked'):
+    sys.stderr.write('Permission denied (locked out)\n'); sys.exit(255)
+cmd = os.environ.get('SSH_ORIGINAL_COMMAND')
+if cmd is not None:
+    c = cmd.strip()
+    if c == '/export terse':
+        print('# 2026-11-14 18:00:00 by RouterOS 7.16\n# software id = FAKE\n' + open(CFG).read(), end='')
+    elif c == '/system identity print':
+        print('  name: fake')
+    elif c.startswith('/add '):
+        open(CFG, 'a').write(c[5:] + '\n')
+    elif c == '/lock':
+        open(D + '/locked', 'w').close()
+    elif c.startswith('/ping'):
+        print('  SEQ HOST SIZE TTL TIME STATUS\n    0 1.1.1.1 56 57 12ms\n    sent=1 received=1 packet-loss=0%')
+    else:
+        print('bad command name %s (line 1 column 2)' % c.split()[0].lstrip('/'))
+    sys.exit(0)
+user = os.environ.get('USER', 'x')
+safe = False
+def restore():
+    if os.path.exists(SNAP):
+        os.replace(SNAP, CFG)
+        try: os.remove(D + '/locked')
+        except FileNotFoundError: pass
+def hup(*_):
+    if safe: restore()
+    os._exit(1)
+signal.signal(signal.SIGHUP, hup); signal.signal(signal.SIGTERM, hup)
+tty.setraw(0)
+out = lambda s: (os.write(1, s.encode()))
+out('\r\n  MikroTik RouterOS 7.16 (fake)\r\n\r\n')
+prompt = lambda: out('[%s@fake] %s ' % (user, '<SAFE>' if safe else '>'))
+prompt()
+line = ''
+while True:
+    b = os.read(0, 1)
+    if not b:
+        hup()
+    ch = b.decode('latin-1')
+    if ch == '\x18':
+        if not safe:
+            safe = True; open(SNAP, 'w').write(open(CFG).read())
+            out('\r\n[Safe Mode taken]\r\n')
+        else:
+            safe = False
+            if os.path.exists(SNAP): os.remove(SNAP)
+            out('\r\n[Safe Mode released]\r\n')
+        prompt()
+    elif ch == '\x04':
+        if safe: restore()
+        out('\r\n'); sys.exit(0)
+    elif ch == '\r':
+        out('\r\n')
+        if line.strip() == '/quit':
+            if os.path.exists(SNAP): os.remove(SNAP)
+            sys.exit(0)
+        line = ''
+        prompt()
+    else:
+        line += ch; out(ch)

@@ -162,6 +162,53 @@ check('a hand-added connection variable in the inventory stops everything', e an
 open(inv, 'w').write(orig)
 t, e = tool('status', hosts='box')
 check('status', not e and 'approved playbook versions: 3' in t, t)
+# ---- RouterOS, against the fake console (rlook/rchange on the same sshd; see tests/fakeros)
+if os.path.exists('/usr/local/bin/fakeros'):
+    shutil.rmtree('/tmp/fakeros', ignore_errors=True)
+    os.makedirs('/tmp/fakeros', mode=0o777)
+    os.chmod('/tmp/fakeros', 0o777)
+    with open('/tmp/fakeros/config', 'w') as f:
+        f.write('/ip address add address=192.168.88.1/24 interface=bridge\n')
+    os.chmod('/tmp/fakeros/config', 0o666)
+    t, e = tool('hosts', action='add', name='rtr', address='127.0.0.1', port=2222, kind='routeros', look_user='rlook',
+                change_user='rchange', key_file=os.environ.get('ASM_TEST_KEY', '/root/.ssh/asm_test'))
+    check('routeros: add host, both accounts', not e and 'change account: logs in' in t, t)
+    t, e = tool('look', hosts='rtr', command='/system identity print')
+    check('routeros: look', 'name: fake' in t, t)
+    good = """- hosts: rtr
+  gather_facts: false
+  tasks:
+    - name: add a route
+      ansible.builtin.raw: /add /ip route add dst-address=10.9.0.0/16 gateway=192.168.88.2
+"""
+    tool('playbook', action='write', path='playbooks/rtr-route.yml', content=good)
+    t, e = tool('plan', playbook='playbooks/rtr-route.yml')
+    check('routeros: plan lists the commands', 'under Safe Mode' in t and '10.9.0.0/16' in t, t)
+    t, e = tool('apply', playbook='playbooks/rtr-route.yml', window='60s', checks=['/ping 1.1.1.1 count=1'])
+    check('routeros: confirmed under Safe Mode, export diff shown', 'CONFIRMED' in t and '+/ip route add' in t and
+          '10.9.0.0' in open('/tmp/fakeros/config').read(), t)
+    lock = """- hosts: rtr
+  gather_facts: false
+  tasks:
+    - ansible.builtin.raw: /add /ip service set ssh address=10.99.0.0/24
+    - ansible.builtin.raw: /lock
+"""
+    tool('playbook', action='write', path='playbooks/rtr-lock.yml', content=lock)
+    t, e = tool('apply', playbook='playbooks/rtr-lock.yml', window='60s')
+    cfg = open('/tmp/fakeros/config').read()
+    check('routeros: lockout -> fresh login fails -> undone through the held session',
+          'REVERTED' in t and '10.99.0.0' not in cfg and not os.path.exists('/tmp/fakeros/locked'), t + '\n' + cfg)
+    bad = """- hosts: rtr
+  gather_facts: false
+  tasks:
+    - ansible.builtin.raw: /add /ip dns set servers=9.9.9.9
+    - ansible.builtin.raw: /ip dns sett servers=1.1.1.1
+"""
+    tool('playbook', action='write', path='playbooks/rtr-bad.yml', content=bad)
+    t, e = tool('apply', playbook='playbooks/rtr-bad.yml', window='60s')
+    check('routeros: a bad command undoes the whole change', 'REVERTED' in t and
+          '9.9.9.9' not in open('/tmp/fakeros/config').read(), t)
+
 lines = open(W + '/state/audit.jsonl').read().splitlines()
 ok = True
 prev = '0' * 64

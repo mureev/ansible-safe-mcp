@@ -832,6 +832,8 @@ def create_look_script(look_user, change_user):
     return '\n'.join([
         'set -e', 'U=%s; C=%s' % (look_user, change_user),
         'if id "$U" >/dev/null 2>&1; then echo "look=existed"; else',
+        '  if [ -f /etc/synoinfo.conf ]; then echo "error=Synology DSM lets only administrators log in over SSH: '
+        'add this host with look_user the same as change_user"; exit 1; fi',
         '  command -v useradd >/dev/null 2>&1 || { echo "error=no useradd on this host: create $U by hand"; exit 1; }',
         '  useradd -m -s /bin/sh "$U"; echo "look=created"',
         'fi',
@@ -1029,7 +1031,9 @@ class Server:
             change_key = look_key
         if not (USER_RE.match(look_u) and USER_RE.match(change_u)):
             raise ToolError('look_user and change_user: account names on the host')
-        if kind not in ('openwrt', 'windows', 'macos', 'jump') and (look_u == change_u or look_u == 'root'):
+        shared_ok = kind == 'linux' and look_u == change_u and look_u != 'root' and not a.get('create_look')
+        if kind not in ('openwrt', 'windows', 'macos', 'jump') and (look_u == change_u or look_u == 'root') \
+                and not shared_ok:
             raise ToolError('look_user and change_user are two different accounts on the host: one that can only '
                             'read, one that can change things (sudo); the look account must not be root')
         jump_host = None
@@ -1071,7 +1075,8 @@ class Server:
             cmd += ['%s@%s' % (change_u, address), 'id -un; id %s >/dev/null 2>&1 && echo LOOK-EXISTS; '
                     'sudo -n true 2>/dev/null && echo SUDO-OK || echo NO-SUDO' % shlex.quote(look_u)]
         else:
-            cmd += ['%s@%s' % (look_u, address), 'id -un; sudo -n true 2>/dev/null && echo SUDO-OK || echo NO-SUDO']
+            cmd += ['%s@%s' % (look_u, address), 'id -un; sudo -n true 2>/dev/null && echo SUDO-OK || echo NO-SUDO; '
+                    'if test -f /etc/synoinfo.conf; then echo SYNOLOGY; fi']
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=40, stdin=subprocess.DEVNULL)
         if not (os.path.exists(kh) and os.path.getsize(kh) > 0):
             shutil.rmtree(d, ignore_errors=True)
@@ -1086,6 +1091,14 @@ class Server:
             shutil.rmtree(d, ignore_errors=True)
             raise ToolError('create_look needs a change account that can sudo without a password; %s cannot' % change_u)
         warn = ''
+        if shared_ok:
+            if 'SYNOLOGY' not in p.stdout:
+                shutil.rmtree(d, ignore_errors=True)
+                raise ToolError('look_user and change_user are two different accounts on the host: one that can only '
+                                'read, one that can change things (sudo); the look account must not be root. '
+                                'create_look=true makes the look account for you.')
+            warn = ('\n\nNote: Synology DSM lets only administrators log in over SSH, so reads run as %s too. They '
+                    'still only read, but the account could change things.' % look_u)
         if kind in ('windows', 'macos') and look_u == change_u:
             warn = ('\n\nNote: one account (%s) for reads and changes: reads still only read, but the account could '
                     'change things.' % look_u)

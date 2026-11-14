@@ -390,6 +390,20 @@ check('create_look: the new account has no groups and no sudo', 'asmlook2' in t 
       and 'sudo' not in t.split('groups=')[-1].split('\n')[0], t)
 tool('hosts', action='remove', name='box2')
 
+# ---- one shared account: refused on Linux, allowed on Synology DSM (only admins may SSH there)
+t, e = tool('hosts', action='add', name='box3', address='127.0.0.1', port=2222, look_user='change',
+            change_user='change', key_file=os.environ.get('ASM_TEST_KEY', '/root/.ssh/asm_test'))
+check('one account for both: refused on plain Linux', e and 'two different accounts' in t, t)
+open('/etc/synoinfo.conf', 'w').write('unique="synology_test"\n')
+try:
+    t, e = tool('hosts', action='add', name='box3', address='127.0.0.1', port=2222, look_user='change',
+                change_user='change', key_file=os.environ.get('ASM_TEST_KEY', '/root/.ssh/asm_test'))
+    check('one account for both: allowed on Synology, with a note in the dialog', not e and 'Added box3' in t
+          and 'look allowlist' not in t and 'Synology' in open(LOG).read().splitlines()[-1], t)
+finally:
+    os.remove('/etc/synoinfo.conf')
+    tool('hosts', action='remove', name='box3')
+
 lines = open(W + '/state/audit.jsonl').read().splitlines()
 ok = True
 prev = '0' * 64

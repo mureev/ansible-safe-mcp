@@ -9,7 +9,7 @@
 [![Galaxy](https://img.shields.io/badge/galaxy-mureev.confirmed-EE0000?logo=ansible&logoColor=white)](https://galaxy.ansible.com/ui/repo/published/mureev/confirmed/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-<img src="docs/hero.svg" width="760" alt="A change cuts SSH. Who holds the undo? With plain Ansible the undo is on your Mac, so the server stays broken until you get there. With ansible-safe-mcp the undo is on the server, so it puts itself back at the deadline.">
+<img src="docs/hero.svg" width="760" alt="On the host's clock: arm at 21:04, apply, SSH lost at 21:05, deadline at 21:14. With block/rescue the undo waits on the controller and the host is still changed at the deadline. With ansible-safe-mcp the undo was armed on the host for a 10-minute window, and the host is restored at the deadline.">
 
 Claude writes the playbook, shows you the diff, and runs it under a timer that lives on the host.<br>
 To install it, give your agent this link:

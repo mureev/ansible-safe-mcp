@@ -927,7 +927,9 @@ class Server:
         if kind == 'routeros':
             cmd += ['%s@%s' % (look_u, address), '/system identity print']
         elif kind == 'jump':
-            cmd += ['-N', '-o', 'ExitOnForwardFailure=yes', '-W', '127.0.0.1:%d' % port, '%s@%s' % (look_u, address)]
+            # a jump account may only be allowed to forward to certain ports (permitopen): check the login only;
+            # forwarding is proven when a host behind it is added
+            cmd += ['%s@%s' % (look_u, address), 'true']
         elif kind == 'openwrt':
             cmd += ['%s@%s' % (look_u, address), 'id -un; cat /etc/openwrt_release 2>/dev/null | head -3']
         elif kind == 'windows':
@@ -998,11 +1000,10 @@ class Server:
         hv = hosts_of(load_inventory(self.cfg))[name]
         kind = hv.get('asm_kind', 'linux')
         if kind == 'jump':
-            base = routeros.ssh_base(hv, hv['asm_look_user'], self.cfg.known_hosts, hv.get('asm_look_key'))
-            p = subprocess.run(base[:-1] + ['-N', '-W', '127.0.0.1:%s' % hv.get('ansible_port', 22), base[-1]],
-                               capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
-            ok = 'SSH-' in p.stdout
-            return 'jump account: %s' % ('logs in and forwards' if ok else 'FAILED: %s' % p.stderr.strip()[-300:])
+            rc, txt = routeros.ssh_exec(hv, hv['asm_look_user'], self.cfg.known_hosts, 'true',
+                                        key=hv.get('asm_look_key'), timeout=30)
+            return 'jump account: %s' % ('logs in (forwarding is checked when a host behind it is added)' if rc == 0
+                                         else 'FAILED: %s' % txt.strip()[-300:])
         if kind == 'windows':
             out = []
             admin = ('([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent())'

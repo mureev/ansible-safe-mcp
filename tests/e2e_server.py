@@ -184,7 +184,7 @@ check('status', not e and 'approved playbook versions: 6' in t, t)
 KEY = os.environ.get('ASM_TEST_KEY', '/root/.ssh/asm_test')
 t, e = tool('hosts', action='add', name='jmp', address='127.0.0.1', port=2222, kind='jump', look_user='look',
             key_file=KEY)
-check('jump: add a jump host (login + forwarding)', not e and 'logs in and forwards' in t, t)
+check('jump: add a jump host', not e and 'jump account: logs in' in t, t)
 t, e = tool('hosts', action='add', name='behind', address='127.0.0.1', port=2222, look_user='look',
             change_user='change', key_file=KEY, jump='jmp')
 check('jump: add a host behind it', not e and 'change account: logs in and can sudo' in t, t)

@@ -823,6 +823,27 @@ def plan_text(plan, stats=None):
 LOOK_SUDOERS = '/etc/sudoers.d/ansible-safe-look'
 
 
+def create_look_script(look_user, change_user):
+    """Shell (run as root) that creates the look account if it is missing: no password, no sudo, no extra groups,
+    logging in with the same keys as the change account."""
+    for u in (look_user, change_user):
+        if not re.match(r'^[a-z_][a-z0-9_.-]{0,31}$', u):
+            raise ToolError('bad account name %r' % u)
+    return '\n'.join([
+        'set -e', 'U=%s; C=%s' % (look_user, change_user),
+        'if id "$U" >/dev/null 2>&1; then echo "look=existed"; else',
+        '  command -v useradd >/dev/null 2>&1 || { echo "error=no useradd on this host: create $U by hand"; exit 1; }',
+        '  useradd -m -s /bin/sh "$U"; echo "look=created"',
+        'fi',
+        'if id -nG "$U" | tr " " "\\n" | grep -qxE "sudo|wheel|admin|docker|root"; then',
+        '  echo "error=$U is in a privileged group; refusing to use it as the look account"; exit 1; fi',
+        'H=$(getent passwd "$U" | cut -d: -f6); CH=$(getent passwd "$C" | cut -d: -f6); G=$(id -gn "$U")',
+        'install -d -m 700 -o "$U" -g "$G" "$H/.ssh"',
+        'grep -v "^#" "$CH/.ssh/authorized_keys" | grep . > "$H/.ssh/authorized_keys.asm"',
+        'install -m 600 -o "$U" -g "$G" "$H/.ssh/authorized_keys.asm" "$H/.ssh/authorized_keys"',
+        'rm -f "$H/.ssh/authorized_keys.asm"', 'echo "keys=copied from $C"'])
+
+
 def look_allowlist_script(look_user):
     """Shell (run as root) that gives the look account a few read commands through sudo: Docker's socket is root
     in disguise, so the look account stays out of the docker group and gets ps/logs/inspect instead. The file is
@@ -996,6 +1017,9 @@ class Server:
         look_key = a.get('look_key') or key_file
         change_key = a.get('change_key') or key_file
         groups = a.get('groups') or []
+        create_look = bool(a.get('create_look'))
+        if create_look and kind != 'linux':
+            raise ToolError('create_look is for Linux hosts')
         if not ADDR_RE.match(address) or address.startswith('-'):
             raise ToolError('address: a hostname or IP')
         if kind not in KINDS:
@@ -1042,6 +1066,10 @@ class Server:
             cmd += ['%s@%s' % (look_u, address), 'id -un; cat /etc/openwrt_release 2>/dev/null | head -3']
         elif kind == 'windows':
             cmd += ['%s@%s' % (look_u, address), 'whoami']
+        elif create_look:
+            cmd = [x if x != look_key else change_key for x in cmd]
+            cmd += ['%s@%s' % (change_u, address), 'id -un; id %s >/dev/null 2>&1 && echo LOOK-EXISTS; '
+                    'sudo -n true 2>/dev/null && echo SUDO-OK || echo NO-SUDO' % shlex.quote(look_u)]
         else:
             cmd += ['%s@%s' % (look_u, address), 'id -un; sudo -n true 2>/dev/null && echo SUDO-OK || echo NO-SUDO']
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=40, stdin=subprocess.DEVNULL)
@@ -1051,8 +1079,12 @@ class Server:
         fp = subprocess.run(['ssh-keygen', '-lf', kh], capture_output=True, text=True).stdout.strip()
         if p.returncode != 0:
             shutil.rmtree(d, ignore_errors=True)
-            raise ToolError('%s answered but the look account %s could not log in: %s' % (
-                address, look_u, p.stderr.strip()[-300:]))
+            raise ToolError('%s answered but the %s account %s could not log in: %s' % (
+                address, 'change' if create_look else 'look', change_u if create_look else look_u,
+                p.stderr.strip()[-300:]))
+        if create_look and 'SUDO-OK' not in p.stdout:
+            shutil.rmtree(d, ignore_errors=True)
+            raise ToolError('create_look needs a change account that can sudo without a password; %s cannot' % change_u)
         warn = ''
         if kind in ('windows', 'macos') and look_u == change_u:
             warn = ('\n\nNote: one account (%s) for reads and changes: reads still only read, but the account could '
@@ -1060,7 +1092,11 @@ class Server:
         if kind == 'openwrt' and look_u == change_u:
             warn = ('\n\nNote: OpenWrt usually has one account, so reads run as %s too. They still only read, but '
                     'the account could change things.' % look_u)
-        if kind in ANSIBLE_KINDS and look_u != change_u and 'SUDO-OK' in p.stdout:
+        if create_look:
+            warn = ('\n\nCreates the look account %s (no password, no sudo, no groups; same keys as %s).' % (
+                look_u, change_u) if 'LOOK-EXISTS' not in p.stdout else
+                    '\n\n%s already exists: it gets the same keys as %s.' % (look_u, change_u))
+        elif kind in ANSIBLE_KINDS and look_u != change_u and 'SUDO-OK' in p.stdout:
             warn = '\n\nWARNING: the look account can sudo without a password, so it is not read-only.'
         allow = ''
         if kind == 'linux' and look_u != change_u:
@@ -1106,6 +1142,14 @@ class Server:
         save_inventory(self.cfg, inv)
         self.audit.write('hosts', summary='added %s %s:%d kind=%s' % (name, address, port, kind), fingerprint=fp)
         extra = ''
+        if create_look:
+            rc, out = routeros.ssh_exec(entry, change_u, self.cfg.known_hosts, 'sudo -n /bin/sh -s', key=change_key or None,
+                                        timeout=60, stdin=create_look_script(look_u, change_u) + '\n')
+            kv = routeros_kv(out)
+            self.audit.write('hosts', summary='look account on %s: %s' % (name, kv.get('look') or kv.get('error')))
+            if rc != 0 or not kv.get('look'):
+                return 'Added %s, but the look account could not be set up: %s' % (name, (kv.get('error') or
+                                                                                        out.strip()[-300:]))
         if kind == 'linux' and look_u != change_u:
             extra = '\n' + self._install_look_allowlist(name)
         return 'Added %s (%s).\n\n%s%s' % (name, fp.split(' ')[1] if ' ' in fp else fp, self._test_host(name), extra)
@@ -2340,7 +2384,10 @@ TOOLS = [
          'change_key': {'type': 'string', 'description': 'key for the change account, if not key_file'},
          'jump': {'type': 'string', 'description': 'name of a host added with kind="jump" (a bastion, or the server '
                                                    'a reverse tunnel ends on) to reach this host through'},
-         'groups': {'type': 'array', 'items': STR}}, 'required': ['action']},
+         'groups': {'type': 'array', 'items': STR},
+         'create_look': {'type': 'boolean', 'description': 'Linux: log in as the change account first and create the '
+                         'look account if missing (no password, no sudo, no groups, the change account\'s keys)'}},
+        'required': ['action']},
      'annotations': {'readOnlyHint': False, 'destructiveHint': False}},
     {'name': 'look', 'title': 'Look',
      'description': 'Read state on hosts as the unprivileged look account. Never changes anything and never asks. '

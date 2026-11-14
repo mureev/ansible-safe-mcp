@@ -6,6 +6,8 @@
   (checked with `visudo`), so the look account may run `docker ps/logs/inspect/images/stats` and
   `journalctl --no-pager` through sudo and nothing else; it stays out of the docker group. `hosts action=setup`
   installs it on a host added earlier.
+- **`create_look`**: adding a Linux host can create the look account through the change account (no password,
+  no sudo, no groups, the change account's keys).
 
 ## 0.3.0 (preview) — 2026-11-14
 

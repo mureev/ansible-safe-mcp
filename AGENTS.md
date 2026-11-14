@@ -72,7 +72,7 @@ change.
 
 | Tool | Does | Asks you? |
 |---|---|---|
-| `hosts` | List, add, test and remove hosts. Adding connects once, shows you the host key's fingerprint, pins it, and checks both accounts (look, change). On Linux it also gives the look account `docker ps/logs/inspect` and `journalctl` through sudo, nothing else; `setup` does that for a host added earlier. | adding a host, `setup` |
+| `hosts` | List, add, test and remove hosts. Adding connects once, shows you the host key's fingerprint, pins it, and checks both accounts (look, change). On Linux it also gives the look account `docker ps/logs/inspect` and `journalctl` through sudo, nothing else; `setup` does that for a host added earlier; `create_look` makes the look account on a Linux host that has none. | adding a host, `setup` |
 | `look` | Read state: shipped reads (services, containers, logs, disk, updates, router status, interfaces) or a one-off read command, run as the unprivileged look account. | no |
 | `playbook` | Create, edit and list playbooks in the project folder (a git repo). Lint runs on every save. | no |
 | `plan` | `--check --diff` for a playbook and a host list: what would change, per host. | no |
@@ -175,7 +175,7 @@ JSON on stdin and approves by exiting 0).
 - `collections/ansible_collections/mureev/confirmed/tests/e2e/`: the collection against a real SSH host: a confirmed
   change stays; a failed check reverts at once; a second arm is refused; and a `DenyUsers` change that locks Ansible
   out is put back by the host at the deadline.
-- `tests/e2e_server.py`: the MCP server over stdio, 57 checks: adding a host, reads as the look account (not
+- `tests/e2e_server.py`: the MCP server over stdio, 59 checks: adding a host, reads as the look account (not
   templated, no sudo), every lint refusal, plan, approve once, rerun without asking, edited playbook asks again,
   decline, a half-failed change reverted at once, the lockout, a tampered inventory, the audit log's hash chain, and
   macOS's server-driven guard, RouterOS under Safe Mode against a stand-in console (confirm; a lockout undone through the held session; a bad

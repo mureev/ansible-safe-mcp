@@ -348,6 +348,17 @@ if os.path.exists('/usr/local/bin/owrt-shell'):
           not os.path.exists('/tmp/fakeowrt/etc/config/half') and
           os.path.exists('/tmp/fakeowrt/etc/config/asmtest'), t)
 
+# ---- create_look (last: it adds an approval to the count)
+subprocess.run(['userdel', '-r', 'asmlook2'], capture_output=True)
+t, e = tool('hosts', action='add', name='box2', address='127.0.0.1', port=2222, look_user='asmlook2',
+            change_user='change', key_file=os.environ.get('ASM_TEST_KEY', '/root/.ssh/asm_test'), create_look=True)
+check('create_look: the server makes the look account, then both accounts work',
+      not e and 'look account: logs in' in t and 'look allowlist: installed' in t, t)
+t, e = tool('look', hosts='box2', command='id; sudo -n true 2>&1 | head -1')
+check('create_look: the new account has no groups and no sudo', 'asmlook2' in t and 'password' in t
+      and 'sudo' not in t.split('groups=')[-1].split('\n')[0], t)
+tool('hosts', action='remove', name='box2')
+
 lines = open(W + '/state/audit.jsonl').read().splitlines()
 ok = True
 prev = '0' * 64

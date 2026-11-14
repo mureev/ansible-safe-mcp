@@ -24,6 +24,7 @@ GUARD_SH = r'''#!/bin/sh
 #   guard.sh boot                    after a reboot: revert if the deadline passed, else restart the timer
 #   guard.sh status
 # Output is key=value lines. State lives in $D; the files a non-root reader may see are 0644.
+# shellcheck disable=SC2046  # "set -- $(cat armed)" splits "ID DEADLINE" on purpose; ids are [A-Za-z0-9_.-]
 D=${ANSIBLE_CONFIRMED_DIR:-/var/lib/ansible-confirmed}
 UNIT=ansible-confirmed-revert
 PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH
@@ -185,7 +186,11 @@ revert() {
   has_systemd && systemctl daemon-reload
   while IFS= read -r s; do
     [ -n "$s" ] || continue
-    if has_systemd; then systemctl try-reload-or-restart "$s" || fail=1
+    # a service named "just in case" (ssh vs sshd) may not exist here: skip it, don't fail the revert
+    if has_systemd; then
+      systemctl cat "$s" >/dev/null 2>&1 || continue
+      systemctl try-reload-or-restart "$s" || fail=1
+    elif [ ! -x "/etc/init.d/$s" ] && ! { command -v rc-service >/dev/null 2>&1 && rc-service -e "$s"; }; then continue
     elif command -v service >/dev/null 2>&1; then
       service "$s" reload >/dev/null 2>&1 || service "$s" restart >/dev/null 2>&1 || fail=1
     elif [ -x "/etc/init.d/$s" ]; then "/etc/init.d/$s" reload || "/etc/init.d/$s" restart || fail=1

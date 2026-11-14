@@ -4,7 +4,7 @@
 
 **Run Ansible from Claude. Every change undoes itself unless it's confirmed.**
 
-![Status](https://img.shields.io/badge/status-design%20preview-d29922)
+![Status](https://img.shields.io/badge/status-0.1%20preview%20%C2%B7%20Linux%20hosts-d29922)
 ![Ansible](https://img.shields.io/badge/ansible--core-2.17%2B-EE0000)
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -17,8 +17,9 @@ If Claude can still reach the host afterwards, the change is kept. If it can't, 
 </div>
 
 > [!NOTE]
-> **Design preview.** This README is written first, before the code, to check that the idea holds. Nothing is
-> released yet. The [roadmap](#roadmap) says what comes in which order.
+> **0.1 preview.** Changes are guarded on **Linux** hosts; RouterOS hosts can be read but not yet changed. Tested end
+> to end against a real SSH server, including a change that locks Ansible out and a host that puts itself back
+> ([tests](#tests)). Not yet on Galaxy or in the MCP directories. The [roadmap](#roadmap) says what comes next.
 
 ---
 
@@ -102,13 +103,13 @@ change.
 
 | Tool | Does | Asks you? |
 |---|---|---|
-| `hosts` | List, add, test and remove hosts. Adding pins the host key, finds the OS and checks both accounts (look, change). | adding a host |
+| `hosts` | List, add, test and remove hosts. Adding connects once, shows you the host key's fingerprint, pins it, and checks both accounts (look, change). | adding a host |
 | `look` | Read state: shipped reads (services, containers, logs, disk, updates, router status, interfaces) or a one-off read command, run as the unprivileged look account. | no |
 | `playbook` | Create, edit and list playbooks in the project folder (a git repo). Lint runs on every save. | no |
 | `plan` | `--check --diff` for a playbook and a host list: what would change, per host. | no |
 | `apply` | Run a playbook for real, under the guard: arm, apply, verify over a fresh connection, confirm or let it revert. | **once per playbook version** |
-| `hands` | A one-off change ("remote hands"): Claude's steps become a generated playbook under the same guard, saved to `oneoffs/`. | **yes, each time** |
-| `job` | Follow a running change; extend its window; confirm or revert it now. | reverting a confirmed change |
+| `hands` *(0.2)* | A one-off change ("remote hands"): Claude's steps become a generated playbook under the same guard, saved to `oneoffs/`. | **yes, each time** |
+| `job` | Follow a running change; extend its window; revert it now. | no |
 | `status` | Pending windows, recent reverts, what the lint guard refused, and the audit log. | no |
 
 ## Safety model
@@ -117,8 +118,10 @@ change.
 |---|---|
 | A change locks you out | The on-host revert timer. Confirmation needs a **new** connection, not a reused one: Ansible keeps SSH connections open, and an old connection can survive a firewall change that blocks every new one. |
 | Claude changes things you didn't approve | Two accounts per host. `look` uses one that can't change the system: on Linux and macOS no sudo beyond a short list of read commands, and not in the `docker` group (Docker's socket is root in disguise); a read-only group on RouterOS. Only `apply` and `hands` use the change account, and only with your yes. |
-| Approving so often you stop reading | You approve a **playbook version**, not a run: the hash of the playbook, its roles, vars and targets. An unchanged playbook reruns without asking; any change to it asks again, showing the diff. Playbooks declare their parameters (`name: string`, `hosts: [web]`), so "add a VPN user called X" is approved once, not once per user. |
-| A playbook runs code on **your** Mac | Playbooks run on the hosts, but some constructs run on the machine running Ansible: `delegate_to: localhost`, `local_action`, `connection: local`, `lookup('pipe')`, plugins in the project folder, inventory scripts. The lint guard refuses them in anything Claude wrote. Next: every run inside a macOS sandbox as well. |
+| Approving so often you stop reading | You approve a **playbook version**, not a run: the hash of the playbook, the files it can pull in, the roles, and the exact hosts. An unchanged version reruns without asking; any change asks again, with the plan. Playbooks declare their parameters (`asm_params` in the first play's vars), so "add a VPN user called X" is approved once, not once per user. Parameter values are checked against the declaration, may not contain template braces, and reach Ansible marked `!unsafe`, so they are never evaluated. |
+| Someone else edits the approvals | Each approval is signed with a key kept in the macOS Keychain, which sandboxed shells can't read. An approval written by anything but this server doesn't verify. |
+| Someone else edits the inventory | The server refuses to run if the inventory holds anything its `hosts` tool wouldn't write: a connection variable, group variables, a jump command. |
+| A playbook runs code on **your** Mac | Playbooks run on the hosts, but some constructs run on the machine running Ansible: `delegate_to`, `local_action`, `connection: local`, plays on `localhost`, lookups and `with_<lookup>` loops, Jinja `include`/`import` and `__` internals, `src:` paths outside the project, `fetch`, connection and user variables, plugin folders and `ansible.cfg` next to playbooks. The lint guard refuses all of them in the whole project, and plan and apply don't run while anything is refused. The server writes its own `ansible.cfg` (YAML inventory only, no inventory scripts). Next: every run inside a macOS sandbox as well. |
 | A "dry run" that isn't one | `check_mode: false` makes a task run for real in check mode. The lint guard refuses it, so `plan` stays a plan. |
 | A playbook disables the guard | Lint refuses changes to the guard's own timers, tasks and scheduler entries. |
 | Nobody notices a revert | The revert writes a note on the host. The next `look` or `status` reports it. |
@@ -141,32 +144,68 @@ lose before a change that touches it; the plan says when a playbook does.
 
 ## The collection: rollback for any Ansible user
 
-The timers are a normal Ansible collection, published on Galaxy as `mureev.confirmed`. It works in any playbook,
-with or without Claude:
+The timers are a normal Ansible collection, `mureev.confirmed` (in [`collections/`](collections/ansible_collections/mureev/confirmed);
+on Galaxy from 0.2). It works in any playbook, with or without Claude:
 
 ```yaml
-- hosts: edge-router
+- hosts: web
+  become: true
   tasks:
     - mureev.confirmed.arm:
         window: 10m
-    - community.routeros.command:
-        commands: [/ip service set ssh address=10.99.0.0/24]
+        paths: [/etc/ssh/sshd_config.d/50-hardening.conf]
+        services: [ssh]
+    - ansible.builtin.copy:
+        src: 50-hardening.conf
+        dest: /etc/ssh/sshd_config.d/50-hardening.conf
+    - ansible.builtin.service: {name: ssh, state: reloaded}
     - mureev.confirmed.confirm:
-        checks: [ssh, ping]        # over a fresh connection; if they fail, the timer stays armed
+        checks: [ssh, service:nginx]   # over a fresh connection; a failed check reverts at once
 ```
 
 ## Install
 
-Not yet released. It will need Python 3.10+, `ansible-core` 2.17+ (`pipx install ansible-core`) on the Mac, and SSH
-access to your hosts with two accounts each. The installer will set up the Claude desktop entry the same way
-[mac-terminal-mcp](https://github.com/mureev/mac-terminal-mcp) does.
+**Requirements:** macOS with the Claude desktop app; Python 3.10+ (`brew install python@3.12`: macOS's own is 3.9);
+SSH access to each host with two accounts: one that can only read (no sudo, not in the `docker` group) and one with
+passwordless sudo, both accepting a key from your ssh-agent.
+
+Run this in Terminal (it quits Claude while it edits Claude's config, then reopens it):
+
+```
+[ -d ~/ansible-safe-mcp ] || git clone https://github.com/mureev/ansible-safe-mcp ~/ansible-safe-mcp
+bash ~/ansible-safe-mcp/install.sh
+```
+
+It makes a venv with `ansible-core` at `~/.config/claude-mcp/ansible-safe-mcp/venv`, installs a read-only copy of the
+server and the collection next to it, checks the copy answers the MCP handshake, backs up
+`claude_desktop_config.json` and adds only the `ansible-safe` entry. `--check` shows what is installed and changes
+nothing; `--remove` takes the entry and the copy out. Your playbooks live in `~/ansible-safe` (a git repo: every file
+Claude writes is a commit); state, approvals and the audit log in `~/.local/state/ansible-safe-mcp`.
+
+If you also use [mac-terminal-mcp](https://github.com/mureev/mac-terminal-mcp), add
+`~/.local/state/ansible-safe-mcp` to its `deny_paths`, so a sandboxed shell can't touch this server's state.
+
+**Other MCP clients:** run `server/ansible_safe_mcp.py` with a Python that has `ansible-core`, with `ASM_PROJECT`,
+`ASM_COLLECTIONS` (this repo's `collections/`) and, off macOS, `ASM_APPROVER` (a command that gets the request as
+JSON on stdin and approves by exiting 0).
+
+## Tests
+
+- `collections/ansible_collections/mureev/confirmed/tests/e2e/`: the collection against a real SSH host: a confirmed
+  change stays; a failed check reverts at once; a second arm is refused; and a `DenyUsers` change that locks Ansible
+  out is put back by the host at the deadline.
+- `tests/e2e_server.py`: the MCP server over stdio, 25 checks: adding a host, reads as the look account (not
+  templated, no sudo), every lint refusal, plan, approve once, rerun without asking, edited playbook asks again,
+  decline, a half-failed change reverted at once, the lockout, a tampered inventory, and the audit log's hash chain.
+
+Both need a disposable host they may break: `127.0.0.1:2222` with accounts `look` and `change`.
 
 ## Roadmap
 
 | Version | Adds |
 |---|---|
-| **0.1** | The collection for Linux and RouterOS; the MCP server with `hosts`, `look`, `playbook`, `plan`, `apply`, `job`, `status`; approval once per playbook version, with declared parameters; lint guard; audit log |
-| 0.2 | Windows and OpenWrt; `hands` (one-off changes) |
+| **0.1** ✓ | The collection for Linux; the MCP server with `hosts`, `look`, `playbook`, `plan`, `apply`, `job`, `status`; approval once per playbook version, with declared parameters; lint guard; audit log; RouterOS reads |
+| 0.2 | RouterOS changes; Windows and OpenWrt; `hands` (one-off changes); the collection on Galaxy |
 | 0.3 | macOS hosts |
 | 0.4 | Every run inside a macOS sandbox (the [mac-terminal](https://github.com/mureev/mac-terminal-mcp) fence); Touch ID approvals |
 

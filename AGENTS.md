@@ -72,7 +72,7 @@ change.
 
 | Tool | Does | Asks you? |
 |---|---|---|
-| `hosts` | List, add, test and remove hosts. Adding connects once, shows you the host key's fingerprint, pins it, and checks both accounts (look, change). | adding a host |
+| `hosts` | List, add, test and remove hosts. Adding connects once, shows you the host key's fingerprint, pins it, and checks both accounts (look, change). On Linux it also gives the look account `docker ps/logs/inspect` and `journalctl` through sudo, nothing else; `setup` does that for a host added earlier. | adding a host, `setup` |
 | `look` | Read state: shipped reads (services, containers, logs, disk, updates, router status, interfaces) or a one-off read command, run as the unprivileged look account. | no |
 | `playbook` | Create, edit and list playbooks in the project folder (a git repo). Lint runs on every save. | no |
 | `plan` | `--check --diff` for a playbook and a host list: what would change, per host. | no |
@@ -86,7 +86,7 @@ change.
 | Risk | What stops it |
 |---|---|
 | A change locks you out | The on-host revert timer. Confirmation needs a **new** connection, not a reused one: Ansible keeps SSH connections open, and an old connection can survive a firewall change that blocks every new one. |
-| Claude changes things you didn't approve | Two accounts per host. `look` uses one that can't change the system: on Linux and macOS no sudo beyond a short list of read commands, and not in the `docker` group (Docker's socket is root in disguise); a read-only group on RouterOS. Only `apply` and `hands` use the change account, and only with your yes. |
+| Claude changes things you didn't approve | Two accounts per host. `look` uses one that can't change the system: on Linux no sudo beyond a short list of read commands (`/etc/sudoers.d/ansible-safe-look`: docker ps/logs/inspect/images/stats, journalctl `--no-pager`), checked with `visudo` before it is installed, and not in the `docker` group (Docker's socket is root in disguise); a read-only group on RouterOS. Only `apply` and `hands` use the change account, and only with your yes. |
 | Approving so often you stop reading | You approve a **playbook version**, not a run: the hash of the playbook, the files it can pull in, the roles, and the exact hosts. An unchanged version reruns without asking; any change asks again, with the plan. Playbooks declare their parameters (`asm_params` in the first play's vars), so "add a VPN user called X" is approved once, not once per user. Parameter values are checked against the declaration, may not contain template braces, and reach Ansible marked `!unsafe`, so they are never evaluated. |
 | Someone else edits the approvals | Each approval is signed with a key kept in the macOS Keychain, which sandboxed shells can't read. An approval written by anything but this server doesn't verify. |
 | Someone else edits the inventory | The server refuses to run if the inventory holds anything its `hosts` tool wouldn't write: a connection variable, group variables, a jump command that differs from the one it would generate. |
@@ -175,7 +175,7 @@ JSON on stdin and approves by exiting 0).
 - `collections/ansible_collections/mureev/confirmed/tests/e2e/`: the collection against a real SSH host: a confirmed
   change stays; a failed check reverts at once; a second arm is refused; and a `DenyUsers` change that locks Ansible
   out is put back by the host at the deadline.
-- `tests/e2e_server.py`: the MCP server over stdio, 55 checks: adding a host, reads as the look account (not
+- `tests/e2e_server.py`: the MCP server over stdio, 57 checks: adding a host, reads as the look account (not
   templated, no sudo), every lint refusal, plan, approve once, rerun without asking, edited playbook asks again,
   decline, a half-failed change reverted at once, the lockout, a tampered inventory, the audit log's hash chain, and
   macOS's server-driven guard, RouterOS under Safe Mode against a stand-in console (confirm; a lockout undone through the held session; a bad

@@ -820,6 +820,40 @@ def plan_text(plan, stats=None):
     return '\n'.join(lines) or '(no hosts)'
 
 
+LOOK_SUDOERS = '/etc/sudoers.d/ansible-safe-look'
+
+
+def look_allowlist_script(look_user):
+    """Shell (run as root) that gives the look account a few read commands through sudo: Docker's socket is root
+    in disguise, so the look account stays out of the docker group and gets ps/logs/inspect instead. The file is
+    checked with visudo before it is installed."""
+    if not USER_RE.match(look_user):
+        raise ToolError('bad look account name')
+    return '\n'.join([
+        'set -e', 'umask 077',
+        'D=$(command -v docker || true); J=$(command -v journalctl || true)',
+        'T=$(mktemp)',
+        '{',
+        '  echo "# ansible-safe-mcp: read-only commands the look account may run with sudo. Remove to revoke."',
+        '  A=""',
+        '  if [ -n "$D" ]; then',
+        '    echo "Cmnd_Alias ASM_DOCKER = $D ps, $D ps *, $D logs *, $D inspect *, $D images, $D images *, '
+        '$D stats --no-stream, $D stats --no-stream *"',
+        '    A="ASM_DOCKER"',
+        '  fi',
+        '  if [ -n "$J" ]; then',
+        '    echo "Cmnd_Alias ASM_JOURNAL = $J --no-pager *"',
+        '    A="${A:+$A, }ASM_JOURNAL"',
+        '  fi',
+        '  [ -n "$A" ] && echo "%s ALL=(root) NOPASSWD: $A"' % look_user,
+        '} > "$T"',
+        'if ! grep -q NOPASSWD "$T"; then rm -f "$T"; echo "allowlist=none (no docker, no journalctl)"; exit 0; fi',
+        'visudo -cqf "$T"',
+        'install -m 0440 -o root -g 0 "$T" %s' % LOOK_SUDOERS,
+        'rm -f "$T"',
+        'echo "allowlist=installed"', 'grep -v "^#" %s' % LOOK_SUDOERS])
+
+
 # ------------------------------------------------------------------------------------------------ the server
 
 READS = {
@@ -936,8 +970,23 @@ class Server:
             if name not in hs:
                 raise ToolError('no host %s' % name)
             return self._test_host(name)
+        if action == 'setup':
+            if name not in hs:
+                raise ToolError('no host %s' % name)
+            hv = hs[name]
+            if hv.get('asm_kind', 'linux') != 'linux' or hv['asm_look_user'] == hv['asm_change_user']:
+                raise ToolError('setup is for Linux hosts with separate look and change accounts')
+            ok, how = ask(self.cfg, 'Let the look account read Docker and journals on %s?' % name,
+                          'Installs %s on %s: the look account %s may run, through sudo and nothing else:\n\n'
+                          '  docker ps / logs / inspect / images / stats --no-stream\n  journalctl --no-pager ...\n\n'
+                          'It stays out of the docker group (Docker\'s socket is root in disguise). The file is checked '
+                          'with visudo first; delete it to revoke.' % (LOOK_SUDOERS, name, hv['asm_look_user']))
+            if not ok:
+                self.audit.write('hosts', summary='setup %s declined (%s)' % (name, how))
+                return 'Not changed: the user declined (%s).' % how
+            return self._install_look_allowlist(name)
         if action != 'add':
-            raise ToolError('action must be list, add, test or remove')
+            raise ToolError('action must be list, add, test, setup or remove')
         address = a.get('address') or name
         port = int(a.get('port') or 22)
         kind = a.get('kind', 'linux')
@@ -1013,8 +1062,12 @@ class Server:
                     'the account could change things.' % look_u)
         if kind in ANSIBLE_KINDS and look_u != change_u and 'SUDO-OK' in p.stdout:
             warn = '\n\nWARNING: the look account can sudo without a password, so it is not read-only.'
-        text = ('Add host %s\n\n%s port %d%s\nkind: %s\nlook account: %s\nchange account: %s\n\nHost key:\n%s%s' % (
-            name, address, port, (' via ' + jump) if jump else '', kind, look_u, change_u, fp, warn))
+        allow = ''
+        if kind == 'linux' and look_u != change_u:
+            allow = ('\n\nAlso installs %s: the look account may run docker ps/logs/inspect and journalctl '
+                     'through sudo, nothing else.' % LOOK_SUDOERS)
+        text = ('Add host %s\n\n%s port %d%s\nkind: %s\nlook account: %s\nchange account: %s\n\nHost key:\n%s%s%s' % (
+            name, address, port, (' via ' + jump) if jump else '', kind, look_u, change_u, fp, warn, allow))
         ok, how = ask(self.cfg, 'Add %s to ansible-safe-mcp?' % name, text)
         if not ok:
             shutil.rmtree(d, ignore_errors=True)
@@ -1052,7 +1105,24 @@ class Server:
             inv['all']['children'][g] = grp
         save_inventory(self.cfg, inv)
         self.audit.write('hosts', summary='added %s %s:%d kind=%s' % (name, address, port, kind), fingerprint=fp)
-        return 'Added %s (%s).\n\n%s' % (name, fp.split(' ')[1] if ' ' in fp else fp, self._test_host(name))
+        extra = ''
+        if kind == 'linux' and look_u != change_u:
+            extra = '\n' + self._install_look_allowlist(name)
+        return 'Added %s (%s).\n\n%s%s' % (name, fp.split(' ')[1] if ' ' in fp else fp, self._test_host(name), extra)
+
+    def _install_look_allowlist(self, name):
+        hv = hosts_of(load_inventory(self.cfg))[name]
+        rc, out = routeros.ssh_exec(hv, hv['asm_change_user'], self.cfg.known_hosts, 'sudo -n /bin/sh -s',
+                                    key=hv.get('asm_change_key'), timeout=60,
+                                    stdin=look_allowlist_script(hv['asm_look_user']) + '\n')
+        state = routeros_kv(out).get('allowlist')
+        self.audit.write('hosts', summary='look allowlist on %s: %s' % (name, state or 'failed rc=%s' % rc))
+        if rc != 0 or not state:
+            return 'look allowlist: FAILED: %s' % out.strip()[-300:]
+        if state == 'none':
+            return 'look allowlist: not needed (no docker, no journalctl on the host)'
+        return 'look allowlist: installed (%s): docker ps/logs/inspect/images/stats and journalctl through sudo' % (
+            LOOK_SUDOERS)
 
     def _test_host(self, name):
         check_inventory(self.cfg)
@@ -1085,9 +1155,8 @@ class Server:
             rc, py = routeros.ssh_exec(hv, hv['asm_look_user'], self.cfg.known_hosts,
                                        '/usr/bin/xcode-select -p >/dev/null 2>&1 && /usr/bin/python3 --version',
                                        key=hv.get('asm_look_key'), timeout=30)
-            out.append('python for changes: %s' % (py.strip() if rc == 0 else
-                       'MISSING: install the Command Line Tools (xcode-select --install) on the Mac; reads work '
-                       'without it, changes need it'))
+            out.append('python: %s' % (py.strip() if rc == 0 else 'none (not needed: reads, the guard and changes go '
+                                                                 'over plain SSH)'))
             return '\n'.join(out)
         if kind == 'openwrt':
             out = []
@@ -1162,8 +1231,9 @@ class Server:
                 c = 'sudo -n docker logs --tail %d %s%s 2>&1' % (lines, ('--since %s ' % q(since)) if since else '',
                                                                   q(container))
             else:
-                c = 'journalctl --no-pager -n %d %s%s%s' % (lines, ('-u %s ' % q(unit)) if unit else '-p warning ',
-                                                           ('--since %s ' % q(since)) if since else '', '')
+                jargs = '-n %d %s%s' % (lines, ('-u %s ' % q(unit)) if unit else '-p warning ',
+                                         ('--since %s' % q(since)) if since else '')
+                c = '{ sudo -n journalctl --no-pager %s 2>/dev/null || journalctl --no-pager %s; }' % (jargs, jargs)
             if grep:
                 c += ' | grep -i -- %s' % q(str(grep)[:200])
             tasks.append(('linux', c + ' | tail -n %d' % lines))
@@ -2259,9 +2329,11 @@ TOOLS = [
     {'name': 'hosts', 'title': 'Hosts',
      'description': 'List, add, test or remove hosts in the inventory. Adding connects once as the look account, '
                     'pins the host key, asks the user (shows the fingerprint), then checks both accounts: look (can '
-                    'only read) and change (can sudo).',
+                    'only read) and change (can sudo). On Linux, adding also gives the look account docker ps/logs/inspect and '
+                    'journalctl through sudo (nothing else; it stays out of the docker group); setup re-installs that '
+                    'on a host added before.',
      'inputSchema': {'type': 'object', 'properties': {
-         'action': {'type': 'string', 'enum': ['list', 'add', 'test', 'remove']},
+         'action': {'type': 'string', 'enum': ['list', 'add', 'test', 'setup', 'remove']},
          'name': STR, 'address': STR, 'port': {'type': 'integer'}, 'kind': {'type': 'string', 'enum': list(KINDS)},
          'look_user': STR, 'change_user': STR, 'key_file': STR,
          'look_key': {'type': 'string', 'description': 'key for the look account, if not key_file'},

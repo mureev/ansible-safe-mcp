@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1 (unreleased)
+
+- **Docker and journal reads as the look account**: adding a Linux host installs `/etc/sudoers.d/ansible-safe-look`
+  (checked with `visudo`), so the look account may run `docker ps/logs/inspect/images/stats` and
+  `journalctl --no-pager` through sudo and nothing else; it stays out of the docker group. `hosts action=setup`
+  installs it on a host added earlier.
+
 ## 0.3.0 (preview) — 2026-11-14
 
 - **Windows hosts**: a PowerShell guard in `C:\ProgramData\asm-guard` (ACL'd to SYSTEM and Administrators) snapshots

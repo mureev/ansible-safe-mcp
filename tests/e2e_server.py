@@ -59,6 +59,7 @@ t, e = tool('hosts', action='add', name='box', address='127.0.0.1', port=2222, l
             change_user='change', key_file=os.environ.get('ASM_TEST_KEY', '/root/.ssh/asm_test'), groups=['web'])
 check('add host: asked once, both accounts work', not e and asked() == 1 and 'look account: logs in' in t
       and 'change account: logs in and can sudo' in t, t)
+check('add host: the look account gets its read allowlist (docker, journals)', 'look allowlist: installed' in t, t)
 t, e = tool('hosts', action='add', name='localhost', address='127.0.0.1', look_user='a', change_user='b')
 check('refuse a host named localhost', e, t)
 
@@ -69,6 +70,11 @@ check('look command: not templated, runs as look, no sudo', '{{ 7*7 }}' in t and
       'password' in t, t)
 t, e = tool('look', hosts='localhost', read='overview')
 check('look refuses localhost', e, t)
+t, e = tool('look', hosts='box', command="sudo -n docker ps -a >/dev/null 2>&1; echo dps=$?; "
+            "sudo -n docker ps -a 2>&1 | grep -c 'password is required'; sudo -n docker run --rm x 2>&1 | head -1; "
+            "sudo -n journalctl -n 1 2>&1 | head -1; ls -l /etc/sudoers.d/ansible-safe-look")
+check('look allowlist: docker ps through sudo, but not docker run or journalctl with a pager',
+      '\n0\n' in t and t.count('password is required') == 2 and '-r--r-----' in t, t)
 
 bad = """- hosts: box
   tasks:

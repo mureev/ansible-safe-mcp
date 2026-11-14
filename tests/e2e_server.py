@@ -274,6 +274,10 @@ mac_mod = """- hosts: macbox
 tool('playbook', action='write', path='playbooks/mac-mod.yml', content=mac_mod)
 t, e = tool('apply', playbook='playbooks/mac-mod.yml', window='60s', paths=['/etc/asm-mac'])
 check('macos path: refuses tasks that are not raw commands', e and 'raw commands only' in t and 'a module' in t, t)
+t, e = tool('look', hosts='all', read='guard')
+mac_part = t.split('== macbox', 1)[-1].split('\n== ', 1)[0]
+check('look across kinds: macOS read over plain SSH, not through Ansible', '== macbox' in t and 'state=' in mac_part
+      and 'UNREACHABLE' not in mac_part and 'mureev.confirmed' not in mac_part, t)
 
 # ---- RouterOS, against the fake console (rlook/rchange on the same sshd; see tests/fakeros)
 if os.path.exists('/usr/local/bin/fakeros'):

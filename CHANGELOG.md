@@ -10,6 +10,8 @@
   no sudo, no groups, the change account's keys).
 - **Synology DSM**: DSM lets only administrators log in over SSH, so a DSM host may use one account for reads and
   changes (detected from `/etc/synoinfo.conf`; the add dialog says so). Plain Linux still needs two.
+- `look` across kinds sends only Linux hosts through Ansible; macOS, Windows, RouterOS and OpenWrt are read over
+  plain SSH even in a mixed pattern (a guard read over `all` showed a Mac behind a jump host as unreachable).
 - **`backup`**: pull a copy of hosts' configuration into `~/.local/state/ansible-safe-mcp/backups/<host>/<time>/`
   (0700 folders, 0600 files, never the project repo): RouterOS `/export terse` as the look account, OpenWrt
   `sysupgrade -b` plus `uci export`, a tar.gz of the listed paths on Linux and macOS, a zip with files and registry

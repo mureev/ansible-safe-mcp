@@ -1359,7 +1359,8 @@ class Server:
         tasks = [(k, c) for k, c in tasks if k == 'linux']
         linux_left = [h for h in self._resolve(pattern) if hs.get(h, {}).get('asm_kind', 'linux') == 'linux']
         if linux_left and (read == 'guard' or tasks):
-            per.update(self._look_ansible(pattern, read, tasks, a))
+            # only the Linux hosts: the other kinds were read above, over plain SSH
+            per.update(self._look_ansible(','.join(linux_left), read, tasks, a))
         self.audit.write('look', summary='%s %s' % (pattern, read or ('command: ' + command[:200])))
         if not per:
             return 'No hosts matched %r.' % pattern
@@ -1394,7 +1395,7 @@ class Server:
         pb = os.path.join(d, 'look.yml')
         body = ['- hosts: %s' % json.dumps(pattern), '  gather_facts: false', '  tasks:']
         if read == 'guard':
-            body += ['    - mureev.confirmed.status:', '      when: asm_kind | default("linux") in ["linux", "macos"]']
+            body += ['    - mureev.confirmed.status:', '      when: asm_kind | default("linux") == "linux"']
         for kind, c in tasks:
             mod = 'ansible.builtin.shell' if kind in ANSIBLE_KINDS else 'ansible.builtin.raw'
             body += ['    - name: %s' % kind, '      %s: %s' % (mod, unsafe_cmd(c)),

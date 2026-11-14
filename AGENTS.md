@@ -141,10 +141,11 @@ The timers are a normal Ansible collection, [`mureev.confirmed` on Galaxy](https
 SSH access to each host with two accounts: one that can only read (no sudo, not in the `docker` group) and one with
 passwordless sudo, both accepting a key from your ssh-agent.
 
-**Per kind of host:** Linux needs Python for Ansible's modules. macOS needs nothing extra: reads, the guard and the
+**Per kind of host:** Linux needs Python for Ansible's modules; `create_look=true` makes the look account for you. macOS needs nothing extra: reads, the guard and the
 change all go over plain SSH, so playbooks there are `raw` shell commands (run with sudo), and changes take
 `paths=[...]`. Windows needs the OpenSSH server and an administrator change account; playbooks there are
-`raw` PowerShell commands, and changes take `paths=[...]` (registry keys as `HKLM:\...`, or files). RouterOS needs a
+`raw` PowerShell commands, and changes take `paths=[...]` (registry keys as `HKLM:\...`, or files). Synology DSM lets only
+administrators log in over SSH, so one account does both there. RouterOS needs a
 read-only group for the look account; OpenWrt can use root for both. Hosts behind a bastion: add the bastion with
 `kind="jump"` first.
 

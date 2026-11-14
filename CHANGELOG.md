@@ -7,7 +7,8 @@
   deadline, also after the PC was off. Tested on Windows 11 Home with a Russian locale (errors decoded from the
   console code page).
 - **macOS hosts**: the server sends the collection's guard over SSH and arms it as a LaunchDaemon, so a Mac without
-  Python can still be changed under the guard. Reads go over plain SSH.
+  Python can still be changed under the guard. Playbooks there are raw commands, run with sudo over a fresh SSH
+  connection. Reads go over plain SSH. Tested on macOS 26 reached through a jump host.
 - **Jump hosts**: `kind="jump"` bastions with their own account, key and pinned host key; hosts with `jump=<name>`
   get a `ProxyCommand` the server writes and the inventory check recomputes.
 - README for people (two screens, new diagrams of why it's safe); everything for agents in `AGENTS.md`.

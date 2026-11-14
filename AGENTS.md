@@ -193,7 +193,7 @@ the collection.
 | MikroTik hAP ax², RouterOS 7.24.5 | a change confirmed under Safe Mode; a typo in the second command undid the whole change, export identical |
 | OpenWrt router | a change confirmed with a uci diff; a typo undone at once |
 | Windows 11 Home (Russian locale) | a registry change confirmed; a typo undone at once; an orphaned arm reverted by the SYSTEM task at its deadline |
-| Behind a jump host | hosts reached through a bastion with a server-written `ProxyCommand` |
+| macOS 26 on a 2019 MacBook Pro, no Python, behind a jump host | a file change confirmed; a typo undone at once, file back as it was |
 
 ## Roadmap
 

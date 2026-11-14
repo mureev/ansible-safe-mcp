@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import re
 
-DEFAULT_DIR = '/var/lib/ansible-confirmed'
+DEFAULT_DIR = '/var/db/ansible-confirmed' if os.uname().sysname == 'Darwin' else '/var/lib/ansible-confirmed'
 MIN_WINDOW = 5
 MAX_WINDOW = 24 * 3600
 
@@ -31,18 +31,53 @@ PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH
 umask 077
 
 now() { date +%s; }
-iso() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$1"; }
+iso() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$1"; }
 stamp() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 log() { echo "$(stamp) $*" >> "$D/guard.log"; logger -t ansible-confirmed "$*" 2>/dev/null; }
 note() { echo "$*" > "$D/last"; chmod 644 "$D/last"; }
 last_out() { [ -f "$D/last" ] && echo "last=$(cat "$D/last")"; return 0; }
 has_systemd() { [ -d /run/systemd/system ] && command -v systemd-run >/dev/null 2>&1; }
+is_darwin() { [ "$(uname)" = Darwin ]; }
+LABEL=io.github.mureev.confirmed
+PLIST=/Library/LaunchDaemons/$LABEL.plist
 key() { echo "$1" | sed 's|/|_|g'; }
 backend() { cat "$D/backend" 2>/dev/null; }
 
+write_plist() {
+  cat > "$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>$LABEL</string>
+  <key>ProgramArguments</key><array><string>/bin/sh</string><string>$D/guard.sh</string><string>watch</string></array>
+  <key>EnvironmentVariables</key><dict><key>ANSIBLE_CONFIRMED_DIR</key><string>$D</string></dict>
+  <key>RunAtLoad</key><true/>
+</dict></plist>
+EOF
+  chown root:wheel "$PLIST" 2>/dev/null; chmod 644 "$PLIST"
+}
+
+# launchd: a daemon that sleeps until the deadline in $D/armed (rereading it, so extend works) and then reverts.
+# RunAtLoad also starts it at boot, so a reboot inside the window still reverts.
+watch() {
+  while [ -e "$D/armed" ]; do
+    set -- $(cat "$D/armed"); left=$(( $2 - $(now) ))
+    if [ "$left" -le 0 ]; then revert timeout; break; fi
+    [ "$left" -gt 5 ] && left=5
+    sleep "$left"
+  done
+  rm -f "$PLIST"
+}
+
 schedule() {
   secs=$1
-  if [ "$(backend)" = systemd ]; then
+  if [ "$(backend)" = launchd ]; then
+    launchctl bootout "system/$LABEL" 2>/dev/null
+    write_plist
+    launchctl bootstrap system "$PLIST" 2>/dev/null || launchctl load -w "$PLIST" 2>/dev/null || return 1
+    sleep 1
+    launchctl print "system/$LABEL" >/dev/null 2>&1 || launchctl list "$LABEL" >/dev/null 2>&1
+  elif [ "$(backend)" = systemd ]; then
     systemctl stop "$UNIT.timer" "$UNIT.service" 2>/dev/null
     systemctl reset-failed "$UNIT.timer" "$UNIT.service" 2>/dev/null
     systemd-run --quiet --unit="$UNIT" --on-active="$secs" \
@@ -50,7 +85,7 @@ schedule() {
     systemctl is-active --quiet "$UNIT.timer"
   else
     # Detached from the SSH session: own session, no inherited descriptors, HUP ignored.
-    rm -f "$D/timer.pid"
+    rm -f "${D:?}/timer.pid"
     nohup setsid /bin/sh -c 'trap "" HUP; echo $$ > "$1/timer.pid"; sleep "$2"; exec /bin/sh "$1/guard.sh" revert timeout' \
       sh "$D" "$secs" </dev/null >/dev/null 2>&1 &
     i=0
@@ -62,18 +97,23 @@ schedule() {
 }
 
 unschedule() {
-  if [ "$(backend)" = systemd ]; then
+  if [ "$(backend)" = launchd ]; then
+    rm -f "$PLIST"
+    launchctl bootout "system/$LABEL" 2>/dev/null || launchctl remove "$LABEL" 2>/dev/null
+  elif [ "$(backend)" = systemd ]; then
     systemctl stop "$UNIT.timer" 2>/dev/null
     systemctl reset-failed "$UNIT.timer" "$UNIT.service" 2>/dev/null
   elif [ -s "$D/timer.pid" ]; then
     p=$(cat "$D/timer.pid")
     kill -TERM -- "-$p" 2>/dev/null || kill -TERM "$p" 2>/dev/null
   fi
-  rm -f "$D/timer.pid"
+  rm -f "${D:?}/timer.pid"
 }
 
 timer_alive() {
-  if [ "$(backend)" = systemd ]; then systemctl is-active --quiet "$UNIT.timer" && echo yes || echo no
+  if [ "$(backend)" = launchd ]; then
+    { launchctl print "system/$LABEL" >/dev/null 2>&1 || [ -e "$PLIST" ]; } && echo yes || echo no
+  elif [ "$(backend)" = systemd ]; then systemctl is-active --quiet "$UNIT.timer" && echo yes || echo no
   elif [ -s "$D/timer.pid" ] && [ -d "/proc/$(cat "$D/timer.pid")" ]; then echo yes
   else echo no; fi
 }
@@ -107,7 +147,7 @@ arm() {
     echo "error=another change is armed here ($(cat "$D/armed" "$D/reverting" 2>/dev/null)); confirm or revert it first"
     rm -rf "$req"; return 3
   fi
-  rm -rf "$D/snap"; mkdir -p "$D/snap"
+  rm -rf "${D:?}/snap"; mkdir -p "${D:?}/snap"
   mv "$req" "$D/snap/req" || { echo "error=request missing"; return 2; }
   : > "$D/snap/present"; : > "$D/snap/absent"
   while IFS= read -r p; do
@@ -121,24 +161,25 @@ arm() {
   done < "$D/snap/req/paths"
   if [ -s "$D/snap/present" ]; then
     if ! tar -C / -cpf "$D/snap/files.tar" -T "$D/snap/present" 2> "$D/snap/tar.err"; then
-      echo "error=snapshot failed: $(head -c 300 "$D/snap/tar.err" | tr '\n' ' ')"; rm -rf "$D/snap"; return 4
+      echo "error=snapshot failed: $(head -c 300 "$D/snap/tar.err" | tr '\n' ' ')"; rm -rf "${D:?}/snap"; return 4
     fi
   fi
-  if [ "$(cat "$D/snap/req/firewall" 2>/dev/null)" = 1 ]; then
+  if [ "$(cat "$D/snap/req/firewall" 2>/dev/null)" = 1 ] && ! is_darwin; then
     if command -v nft >/dev/null 2>&1 && nft list ruleset > "$D/snap/fw.nft" 2>/dev/null; then :
     elif command -v iptables-save >/dev/null 2>&1 && iptables-save > "$D/snap/fw.v4" 2>/dev/null; then
       command -v ip6tables-save >/dev/null 2>&1 && ip6tables-save > "$D/snap/fw.v6" 2>/dev/null
     else
-      echo "error=firewall snapshot requested but neither nft nor iptables-save works here"; rm -rf "$D/snap"; return 4
+      echo "error=firewall snapshot requested but neither nft nor iptables-save works here"; rm -rf "${D:?}/snap"; return 4
     fi
   fi
-  if has_systemd; then echo systemd > "$D/backend"; else echo detached > "$D/backend"; fi
+  if is_darwin; then echo launchd > "$D/backend"
+  elif has_systemd; then echo systemd > "$D/backend"; else echo detached > "$D/backend"; fi
   chmod 644 "$D/backend"
   deadline=$(( $(now) + secs ))
   echo "$id $deadline" > "$D/armed"; chmod 644 "$D/armed"
   [ "$(backend)" = systemd ] && install_boot_unit
   if ! schedule "$secs"; then
-    rm -f "$D/armed"; rm -rf "$D/snap"; echo "error=could not start the revert timer, nothing armed"; return 5
+    rm -f "${D:?}/armed"; rm -rf "${D:?}/snap"; echo "error=could not start the revert timer, nothing armed"; return 5
   fi
   log "armed $id for ${secs}s"
   echo "state=armed"; echo "id=$id"; echo "deadline=$deadline"; echo "deadline_iso=$(iso "$deadline")"
@@ -159,7 +200,7 @@ confirm() {
     mv "$D/confirming" "$D/armed"; echo "error=the armed change is $id, not $want"; return 3
   fi
   unschedule
-  rm -rf "$D/snap" "$D/confirming"
+  rm -rf "${D:?}/snap" "${D:?}/confirming"
   log "confirmed $id"; note "confirmed $(stamp) $id "
   echo "state=confirmed"; echo "id=$id"; last_out
 }
@@ -173,13 +214,14 @@ revert() {
   set -- $(cat "$D/reverting"); id=$1
   [ "$why" = timeout ] || unschedule
   fail=0
-  while IFS= read -r p; do [ -n "$p" ] && rm -rf -- "$p"; done < "$D/snap/absent"
+  while IFS= read -r p; do [ -n "$p" ] && rm -rf -- "$p"; done < "${D:?}/snap/absent"
   for t in "$D"/snap/tree.*; do
     [ -e "$t" ] || continue
     root=$(head -n 1 "$t")
     find "$root" -depth 2>/dev/null | while IFS= read -r f; do grep -qxF -- "$f" "$t" || rm -rf -- "$f"; done
   done
   if [ -f "$D/snap/files.tar" ]; then tar -C / -xpf "$D/snap/files.tar" || fail=1; fi
+  if is_darwin && [ "$(cat "$D/snap/req/firewall" 2>/dev/null)" = 1 ]; then pfctl -f /etc/pf.conf >/dev/null 2>&1 || fail=1; fi
   if [ -f "$D/snap/fw.nft" ]; then { echo "flush ruleset"; cat "$D/snap/fw.nft"; } | nft -f - || fail=1; fi
   if [ -f "$D/snap/fw.v4" ]; then iptables-restore < "$D/snap/fw.v4" || fail=1; fi
   if [ -f "$D/snap/fw.v6" ]; then ip6tables-restore < "$D/snap/fw.v6" || fail=1; fi
@@ -187,7 +229,10 @@ revert() {
   while IFS= read -r s; do
     [ -n "$s" ] || continue
     # a service named "just in case" (ssh vs sshd) may not exist here: skip it, don't fail the revert
-    if has_systemd; then
+    if is_darwin; then
+      launchctl print "system/$s" >/dev/null 2>&1 || continue
+      launchctl kickstart -k "system/$s" || fail=1
+    elif has_systemd; then
       systemctl cat "$s" >/dev/null 2>&1 || continue
       systemctl try-reload-or-restart "$s" || fail=1
     elif [ ! -x "/etc/init.d/$s" ] && ! { command -v rc-service >/dev/null 2>&1 && rc-service -e "$s"; }; then continue
@@ -201,7 +246,8 @@ revert() {
     note "revert-failed $(stamp) $id ($why): snapshot kept in $D/snap "
     echo "state=revert-failed"; echo "id=$id"; last_out; return 7
   fi
-  rm -rf "$D/snap" "$D/reverting" "$D/timer.pid"
+  rm -rf "${D:?}/snap" "${D:?}/reverting" "${D:?}/timer.pid"
+  if [ "$why" = timeout ] && is_darwin; then rm -f "$PLIST"; fi
   log "reverted $id ($why)"; note "reverted $(stamp) $id ($why) "
   echo "state=reverted"; echo "id=$id"; last_out
 }
@@ -244,6 +290,7 @@ case "$cmd" in
   revert) revert "$1" "$2" ;;
   extend) extend "$1" ;;
   boot) boot ;;
+  watch) watch ;;
   status) status ;;
   *) echo "error=usage: arm ID SECONDS REQDIR | confirm [ID] | revert WHY [ID] | extend SECONDS | boot | status"; exit 2 ;;
 esac

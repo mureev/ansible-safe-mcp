@@ -179,6 +179,7 @@ def save_inventory(cfg, inv):
 
 
 HOST_KEYS = {'ansible_host', 'ansible_port', 'ansible_ssh_common_args', 'ansible_network_os', 'asm_kind',
+             'ansible_ssh_use_tty',
              'asm_look_user', 'asm_change_user', 'asm_jump', 'asm_look_key', 'asm_change_key'}
 
 
@@ -187,6 +188,10 @@ def migrate_inventory(cfg):
     inv = load_inventory(cfg)
     changed = False
     for name, v in hosts_of(inv).items():
+        if v.get('asm_kind') == 'routeros' and v.get('ansible_ssh_use_tty') is not False:
+            v['ansible_ssh_use_tty'] = False  # a RouterOS console with a terminal waits for keystrokes
+            inv['all']['hosts'][name] = v
+            changed = True
         old = v.pop('ansible_ssh_private_key_file', None)
         if old:
             v.setdefault('asm_look_key', old)
@@ -878,6 +883,7 @@ class Server:
             entry['ansible_ssh_common_args'] = '-o ProxyJump=%s' % jump
         if kind == 'routeros':
             entry['ansible_network_os'] = 'community.routeros.routeros'
+            entry['ansible_ssh_use_tty'] = False
         inv['all']['hosts'][name] = entry
         for g in [kind] + list(groups):
             grp = inv['all']['children'].setdefault(g, {}) or {}
@@ -891,7 +897,15 @@ class Server:
         return 'Added %s (%s).\n\n%s' % (name, fp.split(' ')[1] if ' ' in fp else fp, self._test_host(name))
 
     def _test_host(self, name):
-        kind = hosts_of(load_inventory(self.cfg))[name].get('asm_kind', 'linux')
+        hv = hosts_of(load_inventory(self.cfg))[name]
+        kind = hv.get('asm_kind', 'linux')
+        if kind == 'routeros':
+            out = []
+            for account in ('look', 'change'):
+                ok, txt = routeros.run_command(hv, hv['asm_%s_user' % account], self.cfg.known_hosts,
+                                               '/system identity print', key=hv.get('asm_%s_key' % account), timeout=30)
+                out.append('%s account: %s' % (account, 'logs in' if ok else 'FAILED: %s' % txt.strip()[-300:]))
+            return '\n'.join(out)
         d = scratch(self.cfg, 'test')
         pb = os.path.join(d, 'test.yml')
         out = []
@@ -960,6 +974,58 @@ class Server:
                     tasks.append((kind, READS[kind][read]))
             if not tasks:
                 raise ToolError('unknown read %r' % read)
+        # RouterOS hosts are read over plain SSH, one connection each, no Ansible in between
+        hs = hosts_of(inv)
+        ros_hosts = [h for h in self._resolve(pattern) if hs.get(h, {}).get('asm_kind') == 'routeros']
+        ros_cmd = next((c for k, c in tasks if k == 'routeros'), None)
+        per = {}
+        if ros_hosts and ros_cmd:
+            threads = []
+
+            def read_one(h):
+                hv = hs[h]
+                ok, txt = routeros.run_command(hv, hv['asm_look_user'], self.cfg.known_hosts, ros_cmd,
+                                               key=hv.get('asm_look_key'), timeout=int(a.get('timeout') or 120))
+                per[h] = txt.rstrip() + ('' if ok else '\n[failed]')
+            for h in ros_hosts:
+                t = threading.Thread(target=read_one, args=(h,))
+                t.start()
+                threads.append(t)
+            for t in threads:
+                t.join()
+        tasks = [(k, c) for k, c in tasks if k != 'routeros']
+        if read == 'guard' or tasks:
+            per.update(self._look_ansible(pattern, read, tasks, a))
+        self.audit.write('look', summary='%s %s' % (pattern, read or ('command: ' + command[:200])))
+        if not per:
+            return 'No hosts matched %r.' % pattern
+        return '\n\n'.join('== %s\n%s' % (h, per[h]) for h in sorted(per))
+
+    def _resolve(self, pattern):
+        """Host names a pattern matches, from the inventory (ansible-inventory would do it too, but slower)."""
+        inv = load_inventory(self.cfg)
+        hs = hosts_of(inv)
+        groups = {g: set(((v or {}).get('hosts') or {}).keys()) for g, v in (inv['all'].get('children') or {}).items()}
+        groups['all'] = set(hs)
+        out = set()
+        import fnmatch
+        for part in re.split(r'[,:]', pattern):
+            if not part or part.startswith(('!', '&')):
+                continue
+            if part in groups:
+                out |= groups[part]
+            else:
+                out |= {h for h in hs if fnmatch.fnmatch(h, part)}
+        for part in re.split(r'[,:]', pattern):
+            if part.startswith('!'):
+                p = part[1:]
+                out -= groups.get(p, {h for h in hs if fnmatch.fnmatch(h, p)})
+            elif part.startswith('&'):
+                p = part[1:]
+                out &= groups.get(p, {h for h in hs if fnmatch.fnmatch(h, p)})
+        return sorted(out)
+
+    def _look_ansible(self, pattern, read, tasks, a):
         d = scratch(self.cfg, 'look')
         pb = os.path.join(d, 'look.yml')
         body = ['- hosts: %s' % json.dumps(pattern), '  gather_facts: false', '  tasks:']
@@ -976,7 +1042,6 @@ class Server:
         write_vars(vf, 'look')
         doc, err, rc = run_playbook(self.cfg, pb, vf, timeout=int(a.get('timeout') or 120))
         shutil.rmtree(d, ignore_errors=True)
-        self.audit.write('look', summary='%s %s' % (pattern, read or ('command: ' + command[:200])))
         if doc is None:
             raise ToolError('ansible failed: %s' % err[-2000:])
         per = {}
@@ -1001,9 +1066,7 @@ class Server:
                 if e.get('status') == 'failed' and e.get('msg'):
                     txt += '\n[failed] ' + str(e['msg'])
                 per[h] = txt
-        if not per:
-            return 'No hosts matched %r.' % pattern
-        return '\n\n'.join('== %s\n%s' % (h, per[h]) for h in sorted(per))
+        return per
 
     # ---- tool: playbook
     def t_playbook(self, a):

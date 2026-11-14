@@ -7,6 +7,7 @@
 ![Status](https://img.shields.io/badge/status-0.2%20preview-d29922)
 ![Ansible](https://img.shields.io/badge/ansible--core-2.17%2B-EE0000)
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
+[![Galaxy](https://img.shields.io/badge/galaxy-mureev.confirmed-EE0000?logo=ansible&logoColor=white)](https://galaxy.ansible.com/ui/repo/published/mureev/confirmed/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 <p><img src="docs/readme-session.svg" width="760" alt="A Claude session. Claude moves a router's management to a new VLAN under a 10-minute revert window. The change applies, but a fresh SSH connection can't reach the router, so Claude can't confirm it. At the deadline the router undoes the change by itself. Claude reconnects, reads that the change was reverted, and explains what was wrong with the plan."></p>
@@ -19,7 +20,7 @@ If Claude can still reach the host afterwards, the change is kept. If it can't, 
 > [!NOTE]
 > **0.2 preview.** Changes are guarded on **Linux**, **MikroTik RouterOS** (Safe Mode) and **OpenWrt**. Tested end
 > to end against a real SSH server, including a change that locks Ansible out and a host that puts itself back
-> ([tests](#tests)). Not yet on Galaxy or in the MCP directories. The [roadmap](#roadmap) says what comes next.
+> ([tests](#tests)). The rollback collection is on [Galaxy](https://galaxy.ansible.com/ui/repo/published/mureev/confirmed/). The [roadmap](#roadmap) says what comes next.
 
 ---
 
@@ -144,8 +145,9 @@ lose before a change that touches it; the plan says when a playbook does.
 
 ## The collection: rollback for any Ansible user
 
-The timers are a normal Ansible collection, `mureev.confirmed` (in [`collections/`](collections/ansible_collections/mureev/confirmed);
-on Galaxy from 0.2). It works in any playbook, with or without Claude:
+The timers are a normal Ansible collection, [`mureev.confirmed` on Galaxy](https://galaxy.ansible.com/ui/repo/published/mureev/confirmed/)
+(`ansible-galaxy collection install mureev.confirmed`; source in
+[`collections/`](collections/ansible_collections/mureev/confirmed)). It works in any playbook, with or without Claude:
 
 ```yaml
 - hosts: web

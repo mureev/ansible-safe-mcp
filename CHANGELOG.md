@@ -8,6 +8,11 @@
   installs it on a host added earlier.
 - **`create_look`**: adding a Linux host can create the look account through the change account (no password,
   no sudo, no groups, the change account's keys).
+- **`backup`**: pull a copy of hosts' configuration into `~/.local/state/ansible-safe-mcp/backups/<host>/<time>/`
+  (0700 folders, 0600 files, never the project repo): RouterOS `/export terse` as the look account, OpenWrt
+  `sysupgrade -b` plus `uci export`, a tar.gz of the listed paths on Linux and macOS, a zip with files and registry
+  exports on Windows. Over a fresh plain SSH connection, no Ansible and no `fetch` (the lint guard still refuses it).
+  Never asks; every file is in the audit log with its sha256; `status` shows the latest backup.
 
 ## 0.3.0 (preview) — 2026-11-14
 

@@ -2329,6 +2329,131 @@ class Server:
         raise ToolError('action must be status, list, extend or revert')
 
     # ---- tool: status
+    def t_backup(self, a):
+        """Pull a copy of config and files from hosts into the state folder (never the project repo). Reads only."""
+        pattern = a.get('hosts', '')
+        if not PATTERN_RE.match(pattern or '') or re.search(r'localhost|127\.|::1', pattern):
+            raise ToolError('hosts: a host name, group or Ansible pattern from the inventory (not localhost)')
+        check_inventory(self.cfg)
+        hs = hosts_of(load_inventory(self.cfg))
+        targets = [h for h in sorted(self._resolve(pattern)) if hs.get(h, {}).get('asm_kind', 'linux') != 'jump']
+        if not targets:
+            return 'No hosts matched %r.' % pattern
+        label = a.get('label') or ''
+        if label and not re.match(r'^[A-Za-z0-9_.-]{1,40}$', label):
+            raise ToolError('label: letters, digits, dot, dash or underscore, up to 40')
+        paths = a.get('paths') or []
+        if not isinstance(paths, list) or len(paths) > 50 or not all(isinstance(p, str) for p in paths):
+            raise ToolError('paths: a list of up to 50 absolute paths')
+        for p in paths:
+            win = re.match(r'^(HKLM|HKCU|HKCR|HKU|HKCC):?\\', p) or re.match(r'^[A-Za-z]:\\', p)
+            if not (p.startswith('/') or win) or re.search(r'(^|[\\/])\.\.([\\/]|$)', p) or \
+                    re.search(r'[\x00-\x1f]', p) or len(p) > 1000:
+                raise ToolError('paths: absolute paths only (/etc/x, C:\\x or HKLM:\\x), no "..": %r' % p)
+        kinds = {h: hs[h].get('asm_kind', 'linux') for h in targets}
+        need = [h for h in targets if kinds[h] in ('linux', 'macos', 'windows')]
+        if need and not paths:
+            raise ToolError('paths=[...] is needed for %s (Linux, macOS and Windows hosts back up the paths you '
+                            'list; routers back up their whole config)' % ', '.join(need))
+        root = os.path.join(self.cfg.state, 'backups')
+        os.makedirs(root, mode=0o700, exist_ok=True)
+        os.chmod(root, 0o700)
+        stamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime()) + ('-' + label if label else '')
+        kh = self.cfg.known_hosts
+        q = shlex.quote
+        out = []
+        for h in targets:
+            hv, kind = hs[h], kinds[h]
+            lu, cu = hv['asm_look_user'], hv['asm_change_user']
+            lk, ck = hv.get('asm_look_key'), hv.get('asm_change_key')
+            files, errors = [], []
+            if kind == 'routeros':
+                ok, txt = routeros.run_command(hv, lu, kh, '/export terse', key=lk, timeout=180)
+                if ok and txt.strip():
+                    files.append(('export.rsc', txt.encode('utf-8'), True))
+                else:
+                    errors.append('/export terse failed: %s' % txt.strip()[-300:])
+            elif kind == 'openwrt':
+                tmp = '/tmp/asm-backup.tar.gz'
+                rc, data, err = routeros.ssh_exec_bytes(
+                    hv, cu, kh, 'sysupgrade -b %s >/dev/null 2>&1 && cat %s; rc=$?; rm -f %s; exit $rc' % (tmp, tmp, tmp),
+                    key=ck)
+                if rc == 0 and data:
+                    files.append(('sysupgrade.tar.gz', data, False))
+                else:
+                    errors.append('sysupgrade -b: exit %s %s' % (rc, err.strip()[-300:]))
+                rc, data, err = routeros.ssh_exec_bytes(hv, cu, kh, 'uci export', key=ck)
+                if rc == 0 and data.strip():
+                    files.append(('uci-export.txt', data, True))
+                else:
+                    errors.append('uci export: exit %s %s' % (rc, err.strip()[-300:]))
+            elif kind in ('linux', 'macos') and not [p for p in paths if p.startswith('/')]:
+                errors.append('no POSIX paths (/...) given for this host')
+            elif kind in ('linux', 'macos'):
+                rc, data, err = routeros.ssh_exec_bytes(
+                    hv, cu, kh, 'sudo -n tar -czf - -- %s' % ' '.join(q(p) for p in paths if p.startswith('/')),
+                    key=ck)
+                if rc == 0 and data:
+                    files.append(('files.tar.gz', data, False))
+                else:
+                    errors.append('tar: exit %s %s' % (rc, err.strip()[-300:]))
+            elif kind == 'windows' and not [p for p in paths if not p.startswith('/')]:
+                errors.append('no Windows paths (C:\\... or HKLM:\\...) given for this host')
+            elif kind == 'windows':
+                lst = windows.b64(json.dumps([p for p in paths if not p.startswith('/')]))
+                script = r"""$ErrorActionPreference = 'Stop'
+$t = Join-Path $env:TEMP ('asm-backup-' + [guid]::NewGuid().ToString('N'))
+$d = Join-Path $t 'backup'
+New-Item -ItemType Directory -Path $d | Out-Null
+try {
+  $paths = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('%s')) | ConvertFrom-Json
+  $i = 0
+  foreach ($p in $paths) {
+    $i++
+    if ($p -match '^(HKLM|HKCU|HKCR|HKU|HKCC):?\\') {
+      $k = $p -replace '^(\w+):', '$1'
+      $out = & reg.exe export $k (Join-Path $d ('%%02d.reg' -f $i)) /y 2>&1
+      if ($LASTEXITCODE -ne 0) { throw ('reg export ' + $p + ': ' + ($out -join ' ')) }
+    } else {
+      Copy-Item -LiteralPath $p -Destination (Join-Path $d ('%%02d-' -f $i) + (Split-Path $p -Leaf)) -Recurse
+    }
+  }
+  $z = Join-Path $t 'backup.zip'
+  Compress-Archive -Path (Join-Path $d '*') -DestinationPath $z
+  'ASMB64:' + [Convert]::ToBase64String([IO.File]::ReadAllBytes($z))
+} finally { Remove-Item -LiteralPath $t -Recurse -Force -ErrorAction SilentlyContinue }
+""" % lst
+                rc, txt = windows.win_exec(hv, cu, kh, script, key=ck, timeout=300)
+                m = re.search(r'ASMB64:([A-Za-z0-9+/=]+)', txt.replace('\n', ''))
+                if rc == 0 and m:
+                    import base64 as _b64
+                    files.append(('backup.zip', _b64.b64decode(m.group(1)), False))
+                else:
+                    errors.append('exit %s %s' % (rc, txt.strip()[-300:]))
+            else:
+                errors.append('no backup for kind %s' % kind)
+            lines = ['== %s' % h]
+            if files:
+                d = os.path.join(root, h, stamp)
+                os.makedirs(d, mode=0o700, exist_ok=True)
+                for x in (os.path.join(root, h), d):
+                    os.chmod(x, 0o700)
+                for name, data, text in files:
+                    fp = os.path.join(d, name)
+                    fd = os.open(fp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                    with os.fdopen(fd, 'wb') as f:
+                        f.write(data)
+                    os.chmod(fp, 0o600)
+                    digest = hashlib.sha256(data).hexdigest()
+                    extra = ', %d lines' % data.decode('utf-8', 'replace').count('\n') if text else ''
+                    lines.append('saved %s (%d bytes%s, sha256 %s)' % (fp, len(data), extra, digest[:16]))
+                    self.audit.write('backup', summary='%s %s %d bytes sha256 %s' % (h, name, len(data), digest))
+            for e in errors:
+                lines.append('FAILED: ' + e)
+                self.audit.write('backup', summary='%s failed: %s' % (h, e[:200]))
+            out.append('\n'.join(lines))
+        return '\n\n'.join(out)
+
     def t_status(self, a):
         lines = ['ansible-safe-mcp %s' % VERSION, 'project: %s' % self.cfg.project,
                  'hosts: %d, approved playbook versions: %d' % (len(hosts_of(load_inventory(self.cfg))),
@@ -2345,6 +2470,11 @@ class Server:
             if j['status'] != 'done':
                 running.append('%s %s on %s' % (jid, j['playbook'], ','.join(j['targets'])))
         lines.append('running jobs: ' + ('; '.join(running) if running else 'none'))
+        broot = os.path.join(self.cfg.state, 'backups')
+        if os.path.isdir(broot):
+            sets = [(h, s) for h in sorted(os.listdir(broot)) for s in sorted(os.listdir(os.path.join(broot, h)))]
+            if sets:
+                lines.append('backups: %d in %s (latest %s %s)' % (len(sets), broot, *max(sets, key=lambda x: x[1])))
         if a.get('hosts'):
             lines.append('\nSafety net on the hosts:\n' + self.t_look({'hosts': a['hosts'], 'read': 'guard'}))
         lines.append('\nRecent activity:')
@@ -2400,6 +2530,19 @@ TOOLS = [
                                              'interfaces', 'guard', 'python']},
          'command': STR, 'unit': STR, 'container': STR, 'since': STR, 'grep': STR,
          'lines': {'type': 'integer'}, 'timeout': {'type': 'integer'}}, 'required': ['hosts']},
+     'annotations': {'readOnlyHint': True}},
+    {'name': 'backup', 'title': 'Backup',
+     'description': 'Pull a copy of hosts\' configuration into the server\'s state folder (never the project repo): '
+                    'RouterOS /export terse, OpenWrt sysupgrade -b plus uci export, and on Linux, macOS and Windows '
+                    'the paths you list (a tar.gz, or a zip with registry exports). Changes nothing and never asks; '
+                    'returns where each file went, its size and sha256, never its contents.',
+     'inputSchema': {'type': 'object', 'properties': {
+         'hosts': {'type': 'string', 'description': 'host, group or pattern'},
+         'paths': {'type': 'array', 'items': STR,
+                   'description': 'absolute paths: /etc/x, C:\\x or HKLM:\\SOFTWARE\\x (needed for Linux, macOS, '
+                                  'Windows)'},
+         'label': {'type': 'string', 'description': 'optional tag for the folder name, e.g. before-upgrade'}},
+         'required': ['hosts']},
      'annotations': {'readOnlyHint': True}},
     {'name': 'playbook', 'title': 'Playbooks',
      'description': 'List, read, write, delete or lint files in the project: playbooks/*.yml, roles/..., '

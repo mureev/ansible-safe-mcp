@@ -81,6 +81,17 @@ def ssh_exec(host, user, known_hosts, command, key=None, timeout=60, stdin=None)
     return p.returncode, ANSI.sub('', (p.stdout or '') + (p.stderr or '')).replace('\r', '')
 
 
+def ssh_exec_bytes(host, user, known_hosts, command, key=None, timeout=300):
+    """A command over a brand-new SSH connection whose stdout may be binary. Returns (exit code, stdout bytes,
+    stderr text)."""
+    try:
+        p = subprocess.run(ssh_base(host, user, known_hosts, key) + [command], capture_output=True,
+                           timeout=timeout, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return 124, b'', 'timed out after %ds' % timeout
+    return p.returncode, p.stdout, p.stderr.decode('utf-8', 'replace')
+
+
 def normalize_export(text):
     """Drop the export's date header and RouterOS's line wrapping, so two exports diff cleanly."""
     lines = []

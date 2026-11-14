@@ -1,0 +1,4 @@
+#!/bin/sh
+# Stand-in for `sysupgrade -b FILE`: a tar.gz of the stand-in's /etc/config.
+[ "$1" = -b ] && [ -n "$2" ] || exit 1
+tar -czf "$2" -C "$R" etc/config

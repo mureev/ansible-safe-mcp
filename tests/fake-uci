@@ -1,4 +1,7 @@
 #!/bin/sh
-# Stand-in for uci show: every line of every config file, prefixed by its file name.
-[ "$1" = show ] || exit 1
-for f in "$R"/etc/config/*; do [ -f "$f" ] && sed "s|^|$(basename "$f"): |" "$f"; done
+# Stand-in for uci: `show` prints every line of every config file, prefixed by its file name; `export` prints the files.
+case "$1" in
+  show) for f in "$R"/etc/config/*; do [ -f "$f" ] && sed "s|^|$(basename "$f"): |" "$f"; done ;;
+  export) for f in "$R"/etc/config/*; do [ -f "$f" ] && { echo "package $(basename "$f")"; cat "$f"; }; done ;;
+  *) exit 1 ;;
+esac

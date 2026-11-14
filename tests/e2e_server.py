@@ -53,13 +53,36 @@ def check(label, cond, detail=''):
 init = rpc('initialize', {'protocolVersion': '2025-06-18', 'capabilities': {}, 'clientInfo': {'name': 't'}})
 check('initialize', init['result']['serverInfo']['name'] == 'ansible-safe-mcp', json.dumps(init))
 names = [t['name'] for t in rpc('tools/list')['result']['tools']]
-check('8 tools', names == ['hosts', 'look', 'playbook', 'plan', 'apply', 'hands', 'job', 'status'], str(names))
+check('9 tools', names == ['hosts', 'look', 'backup', 'playbook', 'plan', 'apply', 'hands', 'job', 'status'], str(names))
 
 t, e = tool('hosts', action='add', name='box', address='127.0.0.1', port=2222, look_user='look',
             change_user='change', key_file=os.environ.get('ASM_TEST_KEY', '/root/.ssh/asm_test'), groups=['web'])
 check('add host: asked once, both accounts work', not e and asked() == 1 and 'look account: logs in' in t
       and 'change account: logs in and can sudo' in t, t)
 check('add host: the look account gets its read allowlist (docker, journals)', 'look allowlist: installed' in t, t)
+# ---- backup: a copy of paths from the host into the state folder, never asks
+with open('/etc/asm-backup-test', 'w') as f:
+    f.write('backup me\n')
+before_asked = asked()
+t, e = tool('backup', hosts='box', paths=['/etc/asm-backup-test'], label='t1')
+m = re.search(r'saved (\S+files\.tar\.gz)', t)
+ok = bool(m) and not e and asked() == before_asked
+if ok:
+    import tarfile
+    ok = (os.stat(m.group(1)).st_mode & 0o777) == 0o600 and (os.stat(os.path.dirname(m.group(1))).st_mode & 0o777) == 0o700
+    with tarfile.open(m.group(1)) as tf:
+        ok = ok and tf.extractfile('etc/asm-backup-test').read() == b'backup me\n'
+    ok = ok and 'backup me' not in t and '-t1' in m.group(1)
+check('backup: linux paths as a 0600 tar.gz in the state folder, no prompt, contents not printed', ok, t)
+t, e = tool('backup', hosts='box', paths=['etc/passwd'])
+check('backup: refuses a relative path', e and 'absolute' in t, t)
+t, e = tool('backup', hosts='box', paths=['/etc/../etc/shadow'])
+check('backup: refuses ".."', e and 'absolute' in t, t)
+t, e = tool('backup', hosts='box')
+check('backup: Linux needs paths', e and 'paths=' in t, t)
+t, e = tool('status')
+check('backup: in the audit log and status', 'backup' in t and 'backups: ' in t, t)
+
 t, e = tool('hosts', action='add', name='localhost', address='127.0.0.1', look_user='a', change_user='b')
 check('refuse a host named localhost', e, t)
 
@@ -265,6 +288,9 @@ if os.path.exists('/usr/local/bin/fakeros'):
     check('routeros: add host, both accounts', not e and 'change account: logs in' in t, t)
     t, e = tool('look', hosts='rtr', command='/system identity print')
     check('routeros: look', 'name: fake' in t, t)
+    t, e = tool('backup', hosts='rtr')
+    m = re.search(r'saved (\S+export\.rsc)', t)
+    check('backup: routeros /export terse saved', not e and m and '192.168.88.1/24' in open(m.group(1)).read(), t)
     good = """- hosts: rtr
   gather_facts: false
   tasks:
@@ -312,6 +338,11 @@ if os.path.exists('/usr/local/bin/owrt-shell'):
     check('openwrt: add a one-account host, both checks', not e and 'can write /etc/config' in t, t)
     t, e = tool('look', hosts='owrt', command='uci show')
     check('openwrt: look', "network: config interface 'lan'" in t, t)
+    t, e = tool('backup', hosts='owrt')
+    m1 = re.search(r'saved (\S+sysupgrade\.tar\.gz)', t)
+    m2 = re.search(r'saved (\S+uci-export\.txt) \(\d+ bytes, \d+ lines', t)
+    check('backup: openwrt sysupgrade -b and uci export saved', not e and m1 and m2 and
+          'package network' in open(m2.group(1)).read(), t)
     good = """- hosts: owrt
   gather_facts: false
   tasks:

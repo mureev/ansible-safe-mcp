@@ -1421,8 +1421,16 @@ class Server:
             stop.set()
             note('%s: %s' % (host, r['outcome']))
             if before is not None:
-                ok, after = routeros.run_command(hv, lu, kh, '/export terse', key=lk, timeout=120)
-                if ok:
+                # an undo takes the router a moment: after a revert, wait (up to ~12 s) until the export settles
+                for attempt in range(7 if r['outcome'] in ('reverted-now', 'lost') else 1):
+                    if attempt:
+                        time.sleep(2)
+                    ok, after = routeros.run_command(hv, lu, kh, '/export terse', key=lk, timeout=120)
+                    if not ok or routeros.normalize_export(after) == before:
+                        break
+                if ok and r['outcome'] in ('reverted-now', 'lost') and routeros.normalize_export(after) == before:
+                    r['export_diff'] = '(identical to before: the router is back where it was)'
+                elif ok:
                     import difflib as _d
                     diff = list(_d.unified_diff(before.splitlines(), routeros.normalize_export(after).splitlines(),
                                                 'before', 'after', lineterm='', n=0))

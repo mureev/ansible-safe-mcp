@@ -42,7 +42,19 @@ USER_RE = re.compile(r'^[a-z_][a-z0-9_.-]{0,31}(\+[a-z0-9]{1,16})?$')
 PATTERN_RE = re.compile(r'^[A-Za-z0-9_.*:,!&\[\]-]{1,400}$')
 SAFE_STR = r'^[A-Za-z0-9 ._@:/+,=-]{0,200}$'
 KINDS = ('linux', 'macos', 'routeros', 'openwrt', 'windows', 'jump')
-ANSIBLE_KINDS = ('linux', 'macos')  # Python on the host: the mureev.confirmed collection guards changes
+ANSIBLE_KINDS = ('linux', 'macos')  # sudo-capable POSIX hosts
+SERVER_GUARDED = ('routeros', 'openwrt', 'windows', 'macos')  # no Python needed: the server drives the guard
+
+
+def collection_guard_sh(cfg):
+    """The collection's guard script, sent as is to macOS hosts (which may have no Python for modules)."""
+    import importlib.util
+    path = os.path.join(cfg.collections, 'ansible_collections', 'mureev', 'confirmed', 'plugins', 'module_utils',
+                        'guard.py')
+    spec = importlib.util.spec_from_file_location('asm_guard_module_utils', path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.GUARD_SH
 OPENWRT_GUARD = os.path.join(HERE, 'openwrt_guard.sh')
 MAX_TEXT = 24000
 
@@ -723,6 +735,17 @@ def routeros_kv(text):
     return out
 
 
+def macos_plan_text(path, targets):
+    cmds = routeros_commands(path)
+    lines = ['%s: under the guard (snapshot of the paths you list + a launchd daemon that restores them at the '
+             'deadline, also after a reboot), %d command%s run with sudo:' % (', '.join(targets), len(cmds),
+                                                                          '' if len(cmds) == 1 else 's')]
+    for name, c in cmds[:60]:
+        lines.append('  > %s%s' % (c[:300], ('    # ' + name) if name else ''))
+    lines.append('  · apply needs paths=[...]: the files and folders the commands change; only those are restored')
+    return '\n'.join(lines)
+
+
 def windows_plan_text(path, targets):
     cmds = routeros_commands(path)
     lines = ['%s: under the guard (snapshot of the paths you list + a one-time scheduled task as SYSTEM that restores '
@@ -1367,14 +1390,14 @@ class Server:
     def t_plan(self, a):
         path, rel, limit, params, targets = self._prepare(a)
         kind = self._kind_of(targets)
-        if kind in ('routeros', 'openwrt', 'windows'):
+        if kind in SERVER_GUARDED:
             h = version_hash(self.cfg, rel, targets)
             approved = self.approvals.approved(h, rel, targets)
             self.audit.write('plan', summary='%s on %s' % (rel, ','.join(targets)), version=h[:12])
             return '%s on %s\nversion %s: %s\n\n%s' % (
                 rel, ', '.join(targets), h[:12],
                 'approved before, apply runs without asking' if approved else 'not approved yet, apply will ask',
-                {'routeros': routeros_plan_text, 'openwrt': openwrt_plan_text,
+                {'routeros': routeros_plan_text, 'openwrt': openwrt_plan_text, 'macos': macos_plan_text,
                  'windows': windows_plan_text}[kind](path, targets))
         plan = self._plan(path, limit, params)
         h = version_hash(self.cfg, rel, targets)
@@ -1407,6 +1430,9 @@ class Server:
         for s in extra_services:
             if not isinstance(s, str) or not re.match(r'^[A-Za-z0-9@._-]{1,120}$', s):
                 raise ToolError('services: unit names')
+        if kind == 'macos' and not extra_paths:
+            raise ToolError('macOS changes need paths=[...]: the files and folders the commands change. Only those are '
+                            'snapshotted and restored on a revert.')
         if kind == 'windows':
             if not extra_paths:
                 raise ToolError('Windows changes need paths=[...]: the registry keys (HKLM:\\SOFTWARE\\...) and files '
@@ -1440,6 +1466,8 @@ class Server:
                 plan, plan_txt = None, openwrt_plan_text(path, targets)
             elif kind == 'windows':
                 plan, plan_txt = None, windows_plan_text(path, targets)
+            elif kind == 'macos':
+                plan, plan_txt = None, macos_plan_text(path, targets)
             else:
                 plan = self._plan(path, limit, params)
                 unreachable = [x for x in targets if (plan.get(x) or {}).get('unreachable')]
@@ -1466,6 +1494,8 @@ class Server:
                     self._run_openwrt(job_id, path, vf, targets, checks, window)
                 elif kind == 'windows':
                     self._run_windows(job_id, path, targets, checks, window, extra_paths)
+                elif kind == 'macos':
+                    self._run_macos(job_id, path, vf, targets, checks, window, extra_paths, extra_services)
                 else:
                     self._run_routeros(job_id, path, vf, targets, checks, window)
                 return
@@ -1529,6 +1559,96 @@ class Server:
         if ok:
             self.approvals.add(h, rel, targets)
         return ok, True, how
+
+    def _run_macos(self, job_id, path, vf, targets, checks, window, paths, services):
+        """macOS: the collection's guard script (launchd backend) installed over SSH; no Python needed."""
+        jd = os.path.join(self.cfg.jobs, job_id)
+        progress = os.path.join(jd, 'progress.log')
+
+        def note(msg):
+            with open(progress, 'a') as f:
+                f.write('%s %s\n' % (time.strftime('%H:%M:%S'), msg))
+        D = '/var/db/ansible-confirmed'
+        G = 'sudo -n env ANSIBLE_CONFIRMED_DIR=%s /bin/sh %s/guard.sh' % (D, D)
+        guard_sh = collection_guard_sh(self.cfg)
+        q = shlex.quote
+        req = '%s/req.%s' % (D, job_id)
+        arm_script = '\n'.join([
+            'set -e', 'umask 077', 'mkdir -p %s && chmod 755 %s' % (D, D),
+            "cat > %s/guard.sh <<'ASM_GUARD_EOF'" % D, guard_sh.rstrip('\n'), 'ASM_GUARD_EOF',
+            'chmod 700 %s/guard.sh' % D, 'mkdir -p %s' % req,
+            ': > %s/paths' % req] + ['printf "%%s\\n" %s >> %s/paths' % (q(p), req) for p in paths] + [
+            ': > %s/services' % req] + ['printf "%%s\\n" %s >> %s/services' % (q(x), req) for x in services] + [
+            'echo 0 > %s/firewall' % req,
+            'ANSIBLE_CONFIRMED_DIR=%s /bin/sh %s/guard.sh arm %s %d %s' % (D, D, job_id, window, req)])
+        results = {}
+        hs = hosts_of(load_inventory(self.cfg))
+        kh = self.cfg.known_hosts
+        for host in targets:
+            hv = hs[host]
+            lu, cu = hv['asm_look_user'], hv['asm_change_user']
+            lk, ck = hv.get('asm_look_key'), hv.get('asm_change_key')
+            r = results[host] = {'outcome': 'unknown', 'changed': 0}
+            rc, out = routeros.ssh_exec(hv, cu, kh, 'sudo -n /bin/sh -s', key=ck, timeout=90, stdin=arm_script + '\n')
+            data = routeros_kv(out)
+            if rc != 0 or data.get('state') != 'armed':
+                r.update(outcome='not-armed', detail='the guard did not arm, so nothing was changed: %s' % (
+                    data.get('error') or out.strip()[-300:]))
+                note('%s: %s' % (host, r['detail']))
+                continue
+            r['deadline'] = data.get('deadline_iso')
+            note('%s: guard armed (%s)' % (host, data.get('backend')))
+            doc, err, prc = run_playbook(self.cfg, path, vf, limit=host, timeout=window)
+            failed = None
+            for task in (doc or {}).get('tasks', []):
+                e = task.get('hosts', {}).get(host)
+                if not e:
+                    continue
+                if e.get('status') == 'changed' or (task['action'].endswith('raw') and e.get('status') == 'ok'):
+                    r['changed'] += 1
+                if e.get('status') in ('failed', 'unreachable'):
+                    out2 = re.sub(r'Shared connection to \S+ closed\.?', '',
+                                  (e.get('stdout') or '') + (e.get('stderr') or '')).strip()
+                    failed = '%s: exit %s%s' % (task['name'], e.get('rc'), (': ' + out2[:400]) if out2 else '')
+                    break
+            if doc is None and not failed:
+                failed = 'ansible did not finish: %s' % err[-400:]
+
+            def guard_cmd(action):
+                return routeros.ssh_exec(hv, cu, kh, '%s %s' % (G, action), key=ck, timeout=60)
+            if failed:
+                rc, out = guard_cmd('revert failed %s' % job_id)
+                r.update(outcome='reverted-now' if routeros_kv(out).get('state') == 'reverted' else 'not-confirmed',
+                         failed_task=failed.split(':', 1)[0], detail=failed)
+            else:
+                rc, fresh = routeros.ssh_exec(hv, lu, kh, 'true', key=lk, timeout=30)
+                r['checks'] = [{'check': 'ssh', 'ok': rc == 0, 'detail': 'fresh login as %s' % lu if rc == 0
+                                else fresh.strip()[-200:]}]
+                bad = rc != 0
+                for c in checks:
+                    if c in ('ssh', 'ping') or bad:
+                        continue
+                    crc, cout = routeros.ssh_exec(hv, cu, kh, c, key=ck, timeout=60)
+                    r['checks'].append({'check': c, 'ok': crc == 0, 'detail': cout.strip()[-200:]})
+                    bad = bad or crc != 0
+                if bad:
+                    rc, out = guard_cmd('revert check-failed %s' % job_id)
+                    ok = routeros_kv(out).get('state') == 'reverted'
+                    r.update(outcome='reverted-now' if ok else 'not-confirmed',
+                             detail='a check failed after the change' + ('' if ok else '; launchd reverts at the '
+                                                                                         'deadline'))
+                else:
+                    rc, out = guard_cmd('confirm %s' % job_id)
+                    if routeros_kv(out).get('state') == 'confirmed':
+                        r['outcome'] = 'confirmed'
+                    else:
+                        r.update(outcome='not-confirmed', detail='could not confirm: %s' % out.strip()[-200:])
+            note('%s: %s' % (host, r['outcome']))
+        job = self._load_job(job_id)
+        job.update(status='done', finished=time.time(), results=results)
+        self._save_job(job)
+        self.audit.write('job', summary='%s %s' % (job_id, ', '.join('%s=%s' % (h, r['outcome'])
+                                                                    for h, r in sorted(results.items()))))
 
     def _run_windows(self, job_id, path, targets, checks, window, paths):
         """Windows: a snapshot of the listed paths and a one-time SYSTEM scheduled task that restores it."""
@@ -2031,7 +2151,7 @@ class Server:
                 job = self._load_job(job_id)
             return self._job_text(job_id)
         if action in ('extend', 'revert'):
-            if job.get('kind') in ('routeros', 'openwrt', 'windows'):
+            if job.get('kind') in SERVER_GUARDED:
                 raise ToolError('RouterOS changes are confirmed or undone within the apply itself (Safe Mode); there is '
                                 'no open window to extend or revert afterwards.')
             if action == 'extend':

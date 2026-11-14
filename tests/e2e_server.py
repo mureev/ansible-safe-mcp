@@ -209,6 +209,33 @@ t, e = tool('look', hosts='behind', command='id')
 check('jump: a hand-edited ProxyCommand stops everything', e and 'jump settings' in t, t)
 open(inv, 'w').write(orig)
 
+# ---- the macOS path (server-driven guard, no Python on the host), exercised on the Linux test box
+t, e = tool('hosts', action='add', name='macbox', address='127.0.0.1', port=2222, kind='macos', look_user='look',
+            change_user='change', key_file=KEY)
+check('macos path: add (accounts over plain SSH)', not e and 'change account: logs in and can sudo' in t, t)
+mac_ok = """- hosts: macbox
+  become: true
+  gather_facts: false
+  tasks:
+    - name: write a file
+      ansible.builtin.raw: echo mac > /etc/asm-mac
+"""
+tool('playbook', action='write', path='playbooks/mac-ok.yml', content=mac_ok)
+t, e = tool('apply', playbook='playbooks/mac-ok.yml', window='60s')
+check('macos path: refuses without paths', e and 'paths=' in t, t)
+t, e = tool('apply', playbook='playbooks/mac-ok.yml', window='60s', paths=['/etc/asm-mac'])
+check('macos path: guard sent over SSH, change confirmed', 'CONFIRMED' in t and open('/etc/asm-mac').read() == 'mac\n', t)
+mac_bad = """- hosts: macbox
+  become: true
+  gather_facts: false
+  tasks:
+    - ansible.builtin.raw: echo changed > /etc/asm-mac
+    - ansible.builtin.raw: exit 4
+"""
+tool('playbook', action='write', path='playbooks/mac-bad.yml', content=mac_bad)
+t, e = tool('apply', playbook='playbooks/mac-bad.yml', window='60s', paths=['/etc/asm-mac'])
+check('macos path: a failing command restores the file', 'REVERTED' in t and open('/etc/asm-mac').read() == 'mac\n', t)
+
 # ---- RouterOS, against the fake console (rlook/rchange on the same sshd; see tests/fakeros)
 if os.path.exists('/usr/local/bin/fakeros'):
     shutil.rmtree('/tmp/fakeros', ignore_errors=True)

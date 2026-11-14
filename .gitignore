@@ -1,3 +1,5 @@
 __pycache__/
 *.pyc
 collections/ansible_collections/mureev/confirmed/tests/output/
+.DS_Store
+*.tar.gz

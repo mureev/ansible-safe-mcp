@@ -4,7 +4,10 @@
 #   bash install.sh --check    show what is installed; changes nothing
 #   bash install.sh --remove   take out the Claude entry and the installed copy (keeps state, project and venv)
 # What it does:
-#   1. Finds Python 3.10+ (Homebrew's or uv's; macOS's own is 3.9), makes a venv with ansible-core in it.
+#   1. Makes a venv with ansible-core on a uv-managed Python 3.12 (installing uv with Homebrew if needed). Not
+#      Homebrew's or python.org's Python: those are framework builds that run as their own app ("Python.app"), and
+#      macOS then wants a separate Local Network permission for it before the server can reach hosts on your LAN.
+#      A plain (non-bundle) Python inherits the Claude app's permission, as Node-based servers do.
 #   2. Copies server/ and collections/ to ~/.config/claude-mcp/ansible-safe-mcp/app, read-only. Claude runs that
 #      copy, never this folder, so nothing that can write here can change what runs.
 #   3. Checks the copy answers the MCP handshake.
@@ -120,12 +123,33 @@ fi
 
 [ "$MODE" = install ] || die "usage: bash install.sh [--check|--remove]"
 say "ansible-safe-mcp: install"
-PY="$(find_python)" || die "needs Python 3.10 or newer. macOS's own is 3.9: brew install python@3.12 (or uv python install 3.12)."
-ok "Python: $PY ($("$PY" -c 'import platform; print(platform.python_version())'))"
 mkdir -p "$DEST"; chmod 700 "$DEST"
-if [ ! -x "$VENV/bin/python" ]; then "$PY" -m venv "$VENV"; ok "venv created at $VENV"; fi
-"$VENV/bin/python" -m pip install -q --upgrade pip >/dev/null
-"$VENV/bin/python" -m pip install -q "ansible-core>=2.17,<2.24"
+UV="$(command -v uv || true)"
+for c in /opt/homebrew/bin/uv /usr/local/bin/uv "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv"; do
+  [ -z "$UV" ] && [ -x "$c" ] && UV="$c"
+done
+if [ -z "$UV" ] && command -v brew >/dev/null 2>&1; then
+  say "Installing uv (a Python manager) with Homebrew"; brew install uv >/dev/null && UV="$(command -v uv)"
+fi
+framework() { "$1" -I -c 'import sysconfig,sys; sys.exit(0 if sysconfig.get_config_var("PYTHONFRAMEWORK") else 1)' 2>/dev/null; }
+if [ -x "$VENV/bin/python" ] && framework "$VENV/bin/python" && [ -n "$UV" ]; then
+  warn "the old venv runs on a framework Python (Python.app); replacing it"
+  rm -rf "$VENV"
+fi
+if [ ! -x "$VENV/bin/python" ]; then
+  if [ -n "$UV" ]; then
+    "$UV" python install 3.12 >/dev/null 2>&1 || true
+    "$UV" venv -q --python 3.12 --python-preference only-managed "$VENV" || die "uv could not make the venv"
+  else
+    PY="$(find_python)" || die "needs uv (brew install uv) or Python 3.10+."
+    "$PY" -m venv "$VENV"
+  fi
+  ok "venv created at $VENV"
+fi
+framework "$VENV/bin/python" && warn "this Python is a framework build: allow \"Python\" in System Settings > Privacy & Security > Local Network, or install uv and run this again"
+ok "Python: $("$VENV/bin/python" -c 'import platform,sys; print(platform.python_version(), sys.base_prefix)')"
+if [ -n "$UV" ]; then "$UV" pip install -q --python "$VENV/bin/python" "ansible-core>=2.17,<2.24"
+else "$VENV/bin/python" -m pip install -q --upgrade pip >/dev/null; "$VENV/bin/python" -m pip install -q "ansible-core>=2.17,<2.24"; fi
 ok "$("$VENV/bin/ansible-playbook" --version | head -1)"
 
 [ -d "$APP" ] && chmod -R u+w "$APP" && rm -rf "$APP"

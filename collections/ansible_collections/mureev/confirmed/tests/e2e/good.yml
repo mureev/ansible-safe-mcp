@@ -1,0 +1,7 @@
+- hosts: box
+  become: true
+  gather_facts: false
+  tasks:
+    - mureev.confirmed.arm: {id: good1, window: 30s, paths: [/etc/asm-test.conf]}
+    - ansible.builtin.copy: {dest: /etc/asm-test.conf, content: "hello\n"}
+    - mureev.confirmed.confirm: {checks: [ssh, "test -f /etc/asm-test.conf"]}

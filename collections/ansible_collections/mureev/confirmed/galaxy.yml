@@ -1,0 +1,18 @@
+namespace: mureev
+name: confirmed
+version: 0.1.0
+readme: README.md
+authors:
+  - Constantine Mureev (@mureev)
+description: >-
+  Commit-confirmed for Ansible. A change undoes itself on the host, from a timer that lives on the host, unless it is
+  confirmed over a fresh connection. For the changes that can lock you out.
+license:
+  - MIT
+tags: [rollback, safety, linux, networking, ssh, firewall]
+dependencies: {}
+repository: https://github.com/mureev/ansible-safe-mcp
+documentation: https://github.com/mureev/ansible-safe-mcp/tree/main/collections/ansible_collections/mureev/confirmed
+issues: https://github.com/mureev/ansible-safe-mcp/issues
+build_ignore:
+  - tests/output

@@ -1,0 +1,9 @@
+- hosts: box
+  become: true
+  gather_facts: false
+  tasks:
+    - mureev.confirmed.arm: {id: cf1, window: 60s, paths: [/etc/asm-cf.conf, /etc/asm-dir]}
+    - ansible.builtin.copy: {dest: /etc/asm-cf.conf, content: "x\n"}
+    - ansible.builtin.copy: {dest: /etc/asm-dir/a, content: "changed\n"}
+    - ansible.builtin.copy: {dest: /etc/asm-dir/b, content: "new\n"}
+    - mureev.confirmed.confirm: {checks: [ssh, "test -f /nonexistent"]}

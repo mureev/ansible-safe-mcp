@@ -1,0 +1,15 @@
+- hosts: box
+  become: true
+  gather_facts: false
+  tasks:
+    - mureev.confirmed.arm: {id: d1, window: 60s}
+    - mureev.confirmed.arm: {id: d2, window: 60s}
+      register: second
+      ignore_errors: true
+    - ansible.builtin.assert: {that: [second is failed, "'another change is armed' in second.msg"]}
+    - mureev.confirmed.extend: {window: 120s}
+      register: ext
+    - ansible.builtin.assert: {that: [ext.deadline_iso is defined]}
+    - mureev.confirmed.revert: {why: test done}
+      register: rv
+    - ansible.builtin.assert: {that: [rv.state == 'reverted']}

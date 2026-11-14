@@ -1,0 +1,8 @@
+- hosts: box
+  become: true
+  gather_facts: false
+  tasks:
+    - mureev.confirmed.arm: {id: lock1, window: 15s, paths: [/etc/ssh/sshd_config.d/50-lock.conf], services: [ssh]}
+    - ansible.builtin.copy: {dest: /etc/ssh/sshd_config.d/50-lock.conf, content: "DenyUsers change look\n"}
+    - ansible.builtin.command: service ssh reload
+    - mureev.confirmed.confirm: {checks: [ssh]}

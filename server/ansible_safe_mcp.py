@@ -797,6 +797,10 @@ READS = {
         'updates': 'softwareupdate --history 2>/dev/null | tail -10',
         'interfaces': 'ifconfig | grep -E "^[a-z]|inet "; echo; netstat -rn -f inet | head -15',
         'logs': 'log show --last 1h --predicate "messageType == error" --style compact 2>/dev/null | tail -n 200',
+        'guard': 'D=/var/db/ansible-confirmed; if [ -e $D/armed ]; then echo "state=armed $(cat $D/armed)"; '
+                 'else echo state=idle; fi; [ -e $D/last ] && echo "last=$(cat $D/last)"; true',
+        'python': 'for p in /usr/bin/python3 /usr/local/bin/python3 /opt/homebrew/bin/python3; do [ -x $p ] && '
+                  'echo "$p: $($p --version 2>&1 | head -1)"; done; xcode-select -p 2>&1',
     },
     'windows': {
         'overview': "$o = Get-CimInstance Win32_OperatingSystem; $o.Caption + ' ' + $o.Version + ' build ' + $o.BuildNumber; "
@@ -1015,6 +1019,21 @@ class Server:
                 what = 'logs in' + (' as an administrator' if account == 'change' else '')
                 out.append('%s account: %s' % (account, what if ok else 'FAILED: %s' % txt.strip()[-300:]))
             return '\n'.join(out)
+        if kind == 'macos':
+            out = []
+            for account in ('look', 'change'):
+                rc, txt = routeros.ssh_exec(hv, hv['asm_%s_user' % account], self.cfg.known_hosts,
+                                            'id -un && sudo -n true' if account == 'change' else 'id -un',
+                                            key=hv.get('asm_%s_key' % account), timeout=30)
+                what = 'logs in' + (' and can sudo' if account == 'change' else '')
+                out.append('%s account: %s' % (account, what if rc == 0 else 'FAILED: %s' % txt.strip()[-300:]))
+            rc, py = routeros.ssh_exec(hv, hv['asm_look_user'], self.cfg.known_hosts,
+                                       '/usr/bin/xcode-select -p >/dev/null 2>&1 && /usr/bin/python3 --version',
+                                       key=hv.get('asm_look_key'), timeout=30)
+            out.append('python for changes: %s' % (py.strip() if rc == 0 else
+                       'MISSING: install the Command Line Tools (xcode-select --install) on the Mac; reads work '
+                       'without it, changes need it'))
+            return '\n'.join(out)
         if kind == 'openwrt':
             out = []
             for account in ('look', 'change'):
@@ -1117,6 +1136,17 @@ class Server:
                 rc, txt = routeros.ssh_exec(hv, hv['asm_look_user'], self.cfg.known_hosts, ow_cmd,
                                             key=hv.get('asm_look_key'), timeout=int(a.get('timeout') or 120))
                 per[h] = txt.rstrip() + ('' if rc == 0 else '\n[exit %s]' % rc)
+        mac_hosts = [h for h in self._resolve(pattern) if hs.get(h, {}).get('asm_kind') == 'macos']
+        if mac_hosts:
+            mac_cmd = command or READS['macos'].get(read or '')
+            for h in mac_hosts:
+                hv = hs[h]
+                if not mac_cmd:
+                    per[h] = '(no %s read for macOS)' % read
+                    continue
+                rc, txt = routeros.ssh_exec(hv, hv['asm_look_user'], self.cfg.known_hosts, mac_cmd,
+                                            key=hv.get('asm_look_key'), timeout=int(a.get('timeout') or 120))
+                per[h] = txt.rstrip() + ('' if rc == 0 else '\n[exit %s]' % rc)
         win_hosts = [h for h in self._resolve(pattern) if hs.get(h, {}).get('asm_kind') == 'windows']
         if win_hosts:
             win_cmd = command or READS['windows'].get(read or '')
@@ -1144,8 +1174,8 @@ class Server:
                 threads.append(t)
             for t in threads:
                 t.join()
-        tasks = [(k, c) for k, c in tasks if k in ANSIBLE_KINDS]
-        linux_left = [h for h in self._resolve(pattern) if hs.get(h, {}).get('asm_kind', 'linux') in ANSIBLE_KINDS]
+        tasks = [(k, c) for k, c in tasks if k == 'linux']
+        linux_left = [h for h in self._resolve(pattern) if hs.get(h, {}).get('asm_kind', 'linux') == 'linux']
         if linux_left and (read == 'guard' or tasks):
             per.update(self._look_ansible(pattern, read, tasks, a))
         self.audit.write('look', summary='%s %s' % (pattern, read or ('command: ' + command[:200])))
@@ -2097,7 +2127,7 @@ TOOLS = [
      'inputSchema': {'type': 'object', 'properties': {
          'hosts': {'type': 'string', 'description': 'host, group or pattern, e.g. web-1 or web:&prod'},
          'read': {'type': 'string', 'enum': ['overview', 'services', 'containers', 'logs', 'disk', 'updates',
-                                             'interfaces', 'guard']},
+                                             'interfaces', 'guard', 'python']},
          'command': STR, 'unit': STR, 'container': STR, 'since': STR, 'grep': STR,
          'lines': {'type': 'integer'}, 'timeout': {'type': 'integer'}}, 'required': ['hosts']},
      'annotations': {'readOnlyHint': True}},

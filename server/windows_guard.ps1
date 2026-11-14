@@ -147,3 +147,6 @@ switch ($Action) {
     Last
   }
 }
+# Reached only when an action finished without its own exit: don't let a native program's last exit code (reg.exe
+# "key not found" while probing) become the script's.
+exit 0

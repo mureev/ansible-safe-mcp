@@ -1200,6 +1200,8 @@ class Server:
 
     # ---- tool: apply
     def t_apply(self, a):
+        """Starts the change as a job and answers within wait_s (below the ~80 s a remote client waits), whether
+        it is still planning, waiting for the user's approval, running, or done."""
         path, rel, limit, params, targets = self._prepare(a)
         kind = self._kind_of(targets)
         try:
@@ -1217,78 +1219,92 @@ class Server:
         for s in extra_services:
             if not isinstance(s, str) or not re.match(r'^[A-Za-z0-9@._-]{1,120}$', s):
                 raise ToolError('services: unit names')
-        if kind == 'routeros':
-            return self._apply_routeros(path, rel, params, targets, window, checks, a)
-        plan = self._plan(path, limit, params)
-        unreachable = [h for h in targets if (plan.get(h) or {}).get('unreachable')]
-        if unreachable:
-            raise ToolError('plan could not reach %s; nothing was changed.\n\n%s' % (', '.join(unreachable),
-                                                                                    plan_text(plan)))
         h = version_hash(self.cfg, rel, targets)
-        asked = False
-        if not self.approvals.approved(h, rel, targets):
-            text = ('Run %s on %s\n\nversion %s%s\nEach host reverts in %s unless Claude confirms it over a fresh '
-                    'connection.\n\n%s' % (rel, ', '.join(targets), h[:12],
-                                          ('\nparams: ' + json.dumps(params)) if params else '',
-                                          fmt_window(window), plan_text(plan)[:1800]))
-            ok, how = ask(self.cfg, 'Run %s on %s?' % (rel, ', '.join(targets)[:60]), text)
-            asked = True
-            if not ok:
-                self.audit.write('apply', summary='%s declined (%s)' % (rel, how), version=h[:12])
-                return 'Not run: the user declined this playbook version (%s). Nothing changed.' % how
-            self.approvals.add(h, rel, targets)
         job_id = time.strftime('%m%d%H%M') + secrets.token_hex(2)
-        jd = os.path.join(self.cfg.jobs, job_id)
-        os.makedirs(jd, mode=0o700)
-        snap = {t: {'paths': sorted(set(plan.get(t, {}).get('paths', set())) | set(extra_paths)),
-                    'services': list(dict.fromkeys(plan.get(t, {}).get('services', []) + extra_services)),
-                    'firewall': 'firewall' in plan.get(t, {}).get('flags', set())} for t in targets}
-        vf = os.path.join(jd, 'vars.yml')
-        write_vars(vf, 'change', dict(params, asm_snapshot=snap))
-        hosts_pat = ':'.join(targets)
-        wrapper = os.path.join(jd, 'run.yml')
-        with open(wrapper, 'w') as f:
-            f.write('\n'.join([
-                '- name: "safety net: arm"',
-                '  hosts: %s' % json.dumps(hosts_pat),
-                '  gather_facts: false',
-                '  become: true',
-                '  tasks:',
-                '    - mureev.confirmed.arm:',
-                '        id: %s' % json.dumps(job_id),
-                '        window: %d' % window,
-                '        paths: "{{ asm_snapshot[inventory_hostname].paths }}"',
-                '        services: "{{ asm_snapshot[inventory_hostname].services }}"',
-                '        firewall: "{{ asm_snapshot[inventory_hostname].firewall }}"',
-                '- import_playbook: %s' % json.dumps(path),
-                '- name: "safety net: confirm"',
-                '  hosts: %s' % json.dumps(hosts_pat),
-                '  gather_facts: false',
-                '  become: true',
-                '  tasks:',
-                '    - mureev.confirmed.confirm:',
-                '        id: %s' % json.dumps(job_id),
-                '        checks: %s' % yaml_val(checks),
-                '']))
+        os.makedirs(os.path.join(self.cfg.jobs, job_id), mode=0o700)
         job = {'id': job_id, 'playbook': rel, 'targets': targets, 'version': h, 'params': params, 'window': window,
-               'started': time.time(), 'status': 'running', 'asked': asked, 'snapshot': snap}
+               'started': time.time(), 'status': 'planning', 'asked': False, 'kind': kind}
         self._save_job(job)
-        progress = os.path.join(jd, 'progress.log')
-        cmd = [self.cfg.playbook_bin, wrapper, '-e', '@' + vf, '--limit', hosts_pat]
-        proc = subprocess.Popen(cmd, cwd=self.cfg.project, env=ansible_env(self.cfg, progress),
-                                stdout=open(os.path.join(jd, 'stdout.log'), 'w'),
-                                stderr=open(os.path.join(jd, 'stderr.log'), 'w'),
-                                stdin=subprocess.DEVNULL, start_new_session=True)
-        job['pid'] = proc.pid
-        self._save_job(job)
-        self.audit.write('apply', summary='%s on %s (job %s)' % (rel, ','.join(targets), job_id), version=h[:12],
-                         asked=asked, params=params)
-        t = threading.Thread(target=self._finish, args=(job_id, proc), daemon=True)
+        args = (job_id, path, rel, limit, params, targets, window, checks, extra_paths, extra_services, h)
+        t = threading.Thread(target=self._apply_flow, args=args, daemon=True)
         t.start()
-        t.join(timeout=max(0, min(int(a.get('wait_s', 50)), 110)))
-        head = ('Approved by the user just now (version %s). ' % h[:12]) if asked else (
-            'Version %s was approved before: ran without asking. ' % h[:12])
-        return head + self._job_text(job_id)
+        t.join(timeout=max(0, min(int(a.get('wait_s', 55)), 70)))
+        return self._job_text(job_id)
+
+    def _set(self, job_id, **kw):
+        job = self._load_job(job_id)
+        job.update(kw)
+        self._save_job(job)
+        return job
+
+    def _apply_flow(self, job_id, path, rel, limit, params, targets, window, checks, extra_paths, extra_services, h):
+        try:
+            if self._load_job(job_id)['kind'] == 'routeros':
+                plan, plan_txt = None, routeros_plan_text(path, targets)
+            else:
+                plan = self._plan(path, limit, params)
+                unreachable = [x for x in targets if (plan.get(x) or {}).get('unreachable')]
+                if unreachable:
+                    self._set(job_id, status='failed', error='the plan could not reach %s; nothing was changed.\n\n%s'
+                              % (', '.join(unreachable), plan_text(plan)))
+                    return
+                plan_txt = plan_text(plan)
+            if not self.approvals.approved(h, rel, targets):
+                self._set(job_id, status='awaiting-approval', plan=plan_txt[:6000])
+            ok, asked, how = self._approve(rel, targets, h, params, window, plan_txt)
+            if not ok:
+                self._set(job_id, status='declined', asked=True, error=how)
+                self.audit.write('apply', summary='%s declined (%s)' % (rel, how), version=h[:12])
+                return
+            self._set(job_id, status='running', asked=asked)
+            self.audit.write('apply', summary='%s on %s (job %s)' % (rel, ','.join(targets), job_id), version=h[:12],
+                             asked=asked, params=params)
+            jd = os.path.join(self.cfg.jobs, job_id)
+            vf = os.path.join(jd, 'vars.yml')
+            if plan is None:
+                write_vars(vf, 'change', params)
+                self._run_routeros(job_id, path, vf, targets, checks, window)
+                return
+            snap = {t: {'paths': sorted(set(plan.get(t, {}).get('paths', set())) | set(extra_paths)),
+                        'services': list(dict.fromkeys(plan.get(t, {}).get('services', []) + extra_services)),
+                        'firewall': 'firewall' in plan.get(t, {}).get('flags', set())} for t in targets}
+            self._set(job_id, snapshot=snap)
+            write_vars(vf, 'change', dict(params, asm_snapshot=snap))
+            hosts_pat = ':'.join(targets)
+            wrapper = os.path.join(jd, 'run.yml')
+            with open(wrapper, 'w') as f:
+                f.write('\n'.join([
+                    '- name: "safety net: arm"',
+                    '  hosts: %s' % json.dumps(hosts_pat),
+                    '  gather_facts: false',
+                    '  become: true',
+                    '  tasks:',
+                    '    - mureev.confirmed.arm:',
+                    '        id: %s' % json.dumps(job_id),
+                    '        window: %d' % window,
+                    '        paths: "{{ asm_snapshot[inventory_hostname].paths }}"',
+                    '        services: "{{ asm_snapshot[inventory_hostname].services }}"',
+                    '        firewall: "{{ asm_snapshot[inventory_hostname].firewall }}"',
+                    '- import_playbook: %s' % json.dumps(path),
+                    '- name: "safety net: confirm"',
+                    '  hosts: %s' % json.dumps(hosts_pat),
+                    '  gather_facts: false',
+                    '  become: true',
+                    '  tasks:',
+                    '    - mureev.confirmed.confirm:',
+                    '        id: %s' % json.dumps(job_id),
+                    '        checks: %s' % yaml_val(checks),
+                    '']))
+            progress = os.path.join(jd, 'progress.log')
+            cmd = [self.cfg.playbook_bin, wrapper, '-e', '@' + vf, '--limit', hosts_pat]
+            proc = subprocess.Popen(cmd, cwd=self.cfg.project, env=ansible_env(self.cfg, progress),
+                                    stdout=open(os.path.join(jd, 'stdout.log'), 'w'),
+                                    stderr=open(os.path.join(jd, 'stderr.log'), 'w'),
+                                    stdin=subprocess.DEVNULL, start_new_session=True)
+            self._set(job_id, pid=proc.pid)
+            self._finish(job_id, proc)
+        except Exception as e:
+            self._set(job_id, status='failed', error='%s: %s' % (type(e).__name__, e))
 
     def _kind_of(self, targets):
         hs = hosts_of(load_inventory(self.cfg))
@@ -1309,29 +1325,6 @@ class Server:
         if ok:
             self.approvals.add(h, rel, targets)
         return ok, True, how
-
-    def _apply_routeros(self, path, rel, params, targets, window, checks, a):
-        h = version_hash(self.cfg, rel, targets)
-        ok, asked, how = self._approve(rel, targets, h, params, window, routeros_plan_text(path, targets))
-        if not ok:
-            self.audit.write('apply', summary='%s declined (%s)' % (rel, how), version=h[:12])
-            return 'Not run: the user declined this playbook version (%s). Nothing changed.' % how
-        job_id = time.strftime('%m%d%H%M') + secrets.token_hex(2)
-        jd = os.path.join(self.cfg.jobs, job_id)
-        os.makedirs(jd, mode=0o700)
-        vf = os.path.join(jd, 'vars.yml')
-        write_vars(vf, 'change', params)
-        job = {'id': job_id, 'playbook': rel, 'targets': targets, 'version': h, 'params': params, 'window': window,
-               'started': time.time(), 'status': 'running', 'asked': asked, 'kind': 'routeros'}
-        self._save_job(job)
-        self.audit.write('apply', summary='%s on %s (job %s, Safe Mode)' % (rel, ','.join(targets), job_id),
-                         version=h[:12], asked=asked, params=params)
-        t = threading.Thread(target=self._run_routeros, args=(job_id, path, vf, targets, checks, window), daemon=True)
-        t.start()
-        t.join(timeout=max(0, min(int(a.get('wait_s', 80)), 110)))
-        head = ('Approved by the user just now (version %s). ' % h[:12]) if asked else (
-            'Version %s was approved before: ran without asking. ' % h[:12])
-        return head + self._job_text(job_id)
 
     def _run_routeros(self, job_id, path, vf, targets, checks, window):
         jd = os.path.join(self.cfg.jobs, job_id)
@@ -1533,8 +1526,24 @@ class Server:
     def _job_text(self, job_id):
         job = self._load_job(job_id)
         jd = os.path.join(self.cfg.jobs, job_id)
-        lines = ['Job %s: %s on %s, window %s.' % (job_id, job['playbook'], ', '.join(job['targets']),
-                                                    fmt_window(job['window']))]
+        v = job.get('version', '')[:12]
+        st = job['status']
+        if st == 'planning':
+            return 'Job %s: planning %s on %s. Follow it with job(id="%s", wait_s=50).' % (
+                job_id, job['playbook'], ', '.join(job['targets']), job_id)
+        if st == 'awaiting-approval':
+            return ('Job %s: waiting for the user to approve %s (version %s) in the dialog on the Mac; it waits up '
+                    'to 5 minutes. Tell the user, then follow with job(id="%s", wait_s=50).\n\n%s' % (
+                        job_id, job['playbook'], v, job_id, job.get('plan', '')))
+        if st == 'declined':
+            return 'Job %s: not run: the user declined %s (version %s; %s). Nothing changed.' % (
+                job_id, job['playbook'], v, job.get('error', ''))
+        if st == 'failed':
+            return 'Job %s: %s did not run. %s' % (job_id, job['playbook'], job.get('error', ''))
+        head = ('Approved by the user (version %s). ' % v) if job.get('asked') else (
+            'Version %s was approved before: ran without asking. ' % v)
+        lines = [head + 'Job %s: %s on %s, window %s.' % (job_id, job['playbook'], ', '.join(job['targets']),
+                                                           fmt_window(job['window']))]
         if job['status'] != 'done':
             try:
                 with open(os.path.join(jd, 'progress.log')) as f:
@@ -1634,7 +1643,7 @@ class Server:
         if action == 'status':
             wait = max(0, min(int(a.get('wait_s', 0)), 110))
             end = time.time() + wait
-            while job['status'] != 'done' and time.time() < end:
+            while job['status'] in ('planning', 'awaiting-approval', 'running') and time.time() < end:
                 time.sleep(1)
                 job = self._load_job(job_id)
             return self._job_text(job_id)

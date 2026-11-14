@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end test of the MCP server over stdio, against a disposable SSH host on 127.0.0.1:2222 with accounts
 `look` (no sudo) and `change` (sudo) that accept the key in $ASM_TEST_KEY. Destructive to that host."""
-import json, os, shutil, subprocess, sys, time
+import json, os, re, shutil, subprocess, sys, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 W = '/tmp/asm-e2e'
@@ -9,8 +9,9 @@ shutil.rmtree(W, ignore_errors=True)
 os.makedirs(W)
 LOG = os.path.join(W, 'asked.log')
 with open(os.path.join(W, 'approver.py'), 'w') as f:
-    f.write('import json,os,sys\nr=json.load(sys.stdin)\nopen(%r,"a").write(json.dumps(r)+"\\n")\n'
-            'sys.exit(1 if os.path.exists(%r) else 0)\n' % (LOG, os.path.join(W, 'DENY')))
+    f.write('import json,os,sys,time\nr=json.load(sys.stdin)\nopen(%r,"a").write(json.dumps(r)+"\\n")\n'
+            'time.sleep(8 if os.path.exists(%r) else 0)\n'
+            'sys.exit(1 if os.path.exists(%r) else 0)\n' % (LOG, os.path.join(W, 'SLOW'), os.path.join(W, 'DENY')))
 env = dict(os.environ, ASM_PROJECT=W + '/project', ASM_STATE=W + '/state', ASM_TEST_SHORT_WINDOWS='1',
            ASM_APPROVER='%s %s/approver.py' % (sys.executable, W))
 srv = subprocess.Popen([sys.executable, os.path.join(ROOT, 'server', 'ansible_safe_mcp.py')], env=env,
@@ -126,6 +127,14 @@ check('edited playbook asks again; a decline changes nothing', asked() == 3 and 
       open('/etc/asm-motd').read() == 'world\n', t)
 os.remove(os.path.join(W, 'DENY'))
 
+open(os.path.join(W, 'SLOW'), 'w').close()
+t, e = tool('apply', playbook='playbooks/motd.yml', params={'message': 'slow'}, wait_s=3)
+jid = re.search(r'Job (\w+)', t).group(1)
+check('apply answers while the user is still deciding', 'waiting for the user to approve' in t or 'planning' in t, t)
+t, e = tool('job', id=jid, wait_s=60)
+check('...and the job finishes once approved', 'CONFIRMED' in t and open('/etc/asm-motd').read() == 'slow\n', t)
+os.remove(os.path.join(W, 'SLOW'))
+
 failing = """- hosts: box
   become: true
   gather_facts: false
@@ -170,7 +179,7 @@ t, e = tool('look', hosts='box', read='overview')
 check('a hand-added connection variable in the inventory stops everything', e and 'ansible_connection' in t, t)
 open(inv, 'w').write(orig)
 t, e = tool('status', hosts='box')
-check('status', not e and 'approved playbook versions: 5' in t, t)
+check('status', not e and 'approved playbook versions: 6' in t, t)
 # ---- RouterOS, against the fake console (rlook/rchange on the same sshd; see tests/fakeros)
 if os.path.exists('/usr/local/bin/fakeros'):
     shutil.rmtree('/tmp/fakeros', ignore_errors=True)

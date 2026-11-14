@@ -1,0 +1,4 @@
+#!/bin/sh
+# Stand-in for uci show: every line of every config file, prefixed by its file name.
+[ "$1" = show ] || exit 1
+for f in "$R"/etc/config/*; do [ -f "$f" ] && sed "s|^|$(basename "$f"): |" "$f"; done

@@ -58,6 +58,16 @@ def run_command(host, user, known_hosts, command, key=None, timeout=60):
     return p.returncode == 0 and not ERROR.search(out), out
 
 
+def ssh_exec(host, user, known_hosts, command, key=None, timeout=60, stdin=None):
+    """Any command over a brand-new SSH connection (no terminal). Returns (exit code, output)."""
+    try:
+        p = subprocess.run(ssh_base(host, user, known_hosts, key) + [command], capture_output=True, text=True,
+                           timeout=timeout, input=stdin if stdin is not None else '')
+    except subprocess.TimeoutExpired:
+        return 124, 'timed out after %ds' % timeout
+    return p.returncode, ANSI.sub('', (p.stdout or '') + (p.stderr or '')).replace('\r', '')
+
+
 def normalize_export(text):
     """Drop the export's date header and RouterOS's line wrapping, so two exports diff cleanly."""
     lines = []

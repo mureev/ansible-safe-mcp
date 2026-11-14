@@ -33,14 +33,15 @@ sys.path.insert(0, HERE)
 import lint  # noqa: E402
 import routeros  # noqa: E402
 
-VERSION = '0.1.0'
+VERSION = '0.2.0'
 PROTOCOLS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05']
 NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$')
 ADDR_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9.:_-]{0,252}$')
 USER_RE = re.compile(r'^[a-z_][a-z0-9_.-]{0,31}(\+[a-z0-9]{1,16})?$')
 PATTERN_RE = re.compile(r'^[A-Za-z0-9_.*:,!&\[\]-]{1,400}$')
 SAFE_STR = r'^[A-Za-z0-9 ._@:/+,=-]{0,200}$'
-KINDS = ('linux', 'routeros')
+KINDS = ('linux', 'routeros', 'openwrt')
+OPENWRT_GUARD = os.path.join(HERE, 'openwrt_guard.sh')
 MAX_TEXT = 24000
 
 
@@ -694,6 +695,18 @@ def routeros_plan_text(path, targets):
     return '\n'.join(lines)
 
 
+def openwrt_plan_text(path, targets):
+    cmds = routeros_commands(path)
+    lines = ['%s: under the on-device guard (snapshot of /etc/config and friends, revert timer in RAM), %d command%s:'
+             % (', '.join(targets), len(cmds), '' if len(cmds) == 1 else 's')]
+    for name, c in cmds[:60]:
+        lines.append('  > %s%s' % (c[:300], ('    # ' + name) if name else ''))
+    lines.append('  · OpenWrt has no Python, so no check mode: these are the commands as written; the result is shown '
+                 'as a uci diff afterwards')
+    lines.append('  · a reboot inside the window loses the guard (as with LuCI\'s own rollback)')
+    return '\n'.join(lines)
+
+
 def plan_text(plan, stats=None):
     lines = []
     for h in sorted(plan):
@@ -739,6 +752,15 @@ READS = {
                 'du -xh --max-depth=1 / 2>/dev/null | sort -h | tail -15',
         'updates': '(apt list --upgradable 2>/dev/null | tail -n +2) || dnf -q check-update 2>/dev/null || true',
         'interfaces': 'ip -br addr; echo; ip route',
+    },
+    'openwrt': {
+        'overview': 'cat /etc/openwrt_release; echo; uptime; echo; free; echo; df -h / /overlay /tmp 2>/dev/null',
+        'interfaces': 'ip -br addr 2>/dev/null || ifconfig; echo; ip route',
+        'services': 'ls /etc/rc.d; echo; ubus call service list 2>/dev/null | head -100',
+        'disk': 'df -h; echo; du -sh /overlay/upper 2>/dev/null',
+        'updates': '(opkg list-upgradable 2>/dev/null || apk list --upgradable 2>/dev/null) | head -50',
+        'logs': 'logread | tail -n 200',
+        'guard': 'sh "$R"/tmp/asm-guard/guard.sh status 2>/dev/null || echo "asm-guard: not armed"',
     },
     'routeros': {
         'overview': '/system resource print',
@@ -817,11 +839,11 @@ class Server:
             raise ToolError('address: a hostname or IP')
         if kind not in KINDS:
             raise ToolError('kind must be one of %s' % ', '.join(KINDS))
-        if not (USER_RE.match(look_u) and USER_RE.match(change_u)) or look_u == change_u:
+        if not (USER_RE.match(look_u) and USER_RE.match(change_u)):
+            raise ToolError('look_user and change_user: account names on the host')
+        if kind != 'openwrt' and (look_u == change_u or look_u == 'root'):
             raise ToolError('look_user and change_user are two different accounts on the host: one that can only '
-                            'read, one that can change things (sudo)')
-        if look_u == 'root':
-            raise ToolError('the look account must not be root')
+                            'read, one that can change things (sudo); the look account must not be root')
         if jump and not re.match(r'^[A-Za-z0-9_.@:-]{1,200}(,[A-Za-z0-9_.@:-]{1,200})*$', jump):
             raise ToolError('proxy_jump: user@host[:port][,...]')
         for label, kf in (('key_file', key_file), ('look_key', look_key), ('change_key', change_key)):
@@ -842,6 +864,8 @@ class Server:
             cmd += ['-i', look_key, '-o', 'IdentitiesOnly=yes']
         if kind == 'routeros':
             cmd += ['%s@%s' % (look_u, address), '/system identity print']
+        elif kind == 'openwrt':
+            cmd += ['%s@%s' % (look_u, address), 'id -un; cat /etc/openwrt_release 2>/dev/null | head -3']
         else:
             cmd += ['%s@%s' % (look_u, address), 'id -un; sudo -n true 2>/dev/null && echo SUDO-OK || echo NO-SUDO']
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=40, stdin=subprocess.DEVNULL)
@@ -854,6 +878,9 @@ class Server:
             raise ToolError('%s answered but the look account %s could not log in: %s' % (
                 address, look_u, p.stderr.strip()[-300:]))
         warn = ''
+        if kind == 'openwrt' and look_u == change_u:
+            warn = ('\n\nNote: OpenWrt usually has one account, so reads run as %s too. They still only read, but '
+                    'the account could change things.' % look_u)
         if kind == 'linux' and 'SUDO-OK' in p.stdout:
             warn = '\n\nWARNING: the look account can sudo without a password, so it is not read-only.'
         text = ('Add host %s\n\n%s port %d%s\nkind: %s\nlook account: %s\nchange account: %s\n\nHost key:\n%s%s' % (
@@ -899,6 +926,15 @@ class Server:
     def _test_host(self, name):
         hv = hosts_of(load_inventory(self.cfg))[name]
         kind = hv.get('asm_kind', 'linux')
+        if kind == 'openwrt':
+            out = []
+            for account in ('look', 'change'):
+                rc, txt = routeros.ssh_exec(hv, hv['asm_%s_user' % account], self.cfg.known_hosts,
+                                            'id -un && test -w "$R/etc/config"' if account == 'change' else 'id -un',
+                                            key=hv.get('asm_%s_key' % account), timeout=30)
+                what = 'logs in' + (' and can write /etc/config' if account == 'change' else '')
+                out.append('%s account: %s' % (account, what if rc == 0 else 'FAILED: %s' % txt.strip()[-300:]))
+            return '\n'.join(out)
         if kind == 'routeros':
             out = []
             for account in ('look', 'change'):
@@ -976,9 +1012,23 @@ class Server:
                 raise ToolError('unknown read %r' % read)
         # RouterOS hosts are read over plain SSH, one connection each, no Ansible in between
         hs = hosts_of(inv)
+        per = {}
+        ow_hosts = [h for h in self._resolve(pattern) if hs.get(h, {}).get('asm_kind') == 'openwrt']
+        if ow_hosts:
+            ow_cmd = command or READS['openwrt'].get(read or '')
+            if read == 'logs':
+                ow_cmd = 'logread | tail -n %d' % lines + (' | grep -i -- %s' % shlex.quote(str(a['grep'])[:200])
+                                                          if a.get('grep') else '')
+            for h in ow_hosts:
+                hv = hs[h]
+                if not ow_cmd:
+                    per[h] = '(no %s read for OpenWrt)' % read
+                    continue
+                rc, txt = routeros.ssh_exec(hv, hv['asm_look_user'], self.cfg.known_hosts, ow_cmd,
+                                            key=hv.get('asm_look_key'), timeout=int(a.get('timeout') or 120))
+                per[h] = txt.rstrip() + ('' if rc == 0 else '\n[exit %s]' % rc)
         ros_hosts = [h for h in self._resolve(pattern) if hs.get(h, {}).get('asm_kind') == 'routeros']
         ros_cmd = next((c for k, c in tasks if k == 'routeros'), None)
-        per = {}
         if ros_hosts and ros_cmd:
             threads = []
 
@@ -993,8 +1043,9 @@ class Server:
                 threads.append(t)
             for t in threads:
                 t.join()
-        tasks = [(k, c) for k, c in tasks if k != 'routeros']
-        if read == 'guard' or tasks:
+        tasks = [(k, c) for k, c in tasks if k == 'linux']
+        linux_left = [h for h in self._resolve(pattern) if hs.get(h, {}).get('asm_kind', 'linux') == 'linux']
+        if linux_left and (read == 'guard' or tasks):
             per.update(self._look_ansible(pattern, read, tasks, a))
         self.audit.write('look', summary='%s %s' % (pattern, read or ('command: ' + command[:200])))
         if not per:
@@ -1181,14 +1232,14 @@ class Server:
     def t_plan(self, a):
         path, rel, limit, params, targets = self._prepare(a)
         kind = self._kind_of(targets)
-        if kind == 'routeros':
+        if kind in ('routeros', 'openwrt'):
             h = version_hash(self.cfg, rel, targets)
             approved = self.approvals.approved(h, rel, targets)
             self.audit.write('plan', summary='%s on %s' % (rel, ','.join(targets)), version=h[:12])
             return '%s on %s\nversion %s: %s\n\n%s' % (
                 rel, ', '.join(targets), h[:12],
                 'approved before, apply runs without asking' if approved else 'not approved yet, apply will ask',
-                routeros_plan_text(path, targets))
+                (routeros_plan_text if kind == 'routeros' else openwrt_plan_text)(path, targets))
         plan = self._plan(path, limit, params)
         h = version_hash(self.cfg, rel, targets)
         approved = self.approvals.approved(h, rel, targets)
@@ -1239,8 +1290,11 @@ class Server:
 
     def _apply_flow(self, job_id, path, rel, limit, params, targets, window, checks, extra_paths, extra_services, h):
         try:
-            if self._load_job(job_id)['kind'] == 'routeros':
+            kind = self._load_job(job_id)['kind']
+            if kind == 'routeros':
                 plan, plan_txt = None, routeros_plan_text(path, targets)
+            elif kind == 'openwrt':
+                plan, plan_txt = None, openwrt_plan_text(path, targets)
             else:
                 plan = self._plan(path, limit, params)
                 unreachable = [x for x in targets if (plan.get(x) or {}).get('unreachable')]
@@ -1263,7 +1317,10 @@ class Server:
             vf = os.path.join(jd, 'vars.yml')
             if plan is None:
                 write_vars(vf, 'change', params)
-                self._run_routeros(job_id, path, vf, targets, checks, window)
+                if kind == 'openwrt':
+                    self._run_openwrt(job_id, path, vf, targets, checks, window)
+                else:
+                    self._run_routeros(job_id, path, vf, targets, checks, window)
                 return
             snap = {t: {'paths': sorted(set(plan.get(t, {}).get('paths', set())) | set(extra_paths)),
                         'services': list(dict.fromkeys(plan.get(t, {}).get('services', []) + extra_services)),
@@ -1325,6 +1382,97 @@ class Server:
         if ok:
             self.approvals.add(h, rel, targets)
         return ok, True, how
+
+    def _run_openwrt(self, job_id, path, vf, targets, checks, window):
+        """OpenWrt: the guard is a snapshot + timer on the device (openwrt_guard.sh, sent at arm time)."""
+        jd = os.path.join(self.cfg.jobs, job_id)
+        progress = os.path.join(jd, 'progress.log')
+
+        def note(msg):
+            with open(progress, 'a') as f:
+                f.write('%s %s\n' % (time.strftime('%H:%M:%S'), msg))
+        with open(OPENWRT_GUARD) as f:
+            guard = f.read()
+        G = 'sh /tmp/asm-guard/guard.sh'
+        results = {}
+        hs = hosts_of(load_inventory(self.cfg))
+        kh = self.cfg.known_hosts
+        for host in targets:
+            hv = hs[host]
+            lu, cu = hv['asm_look_user'], hv['asm_change_user']
+            lk, ck = hv.get('asm_look_key'), hv.get('asm_change_key')
+            r = results[host] = {'outcome': 'unknown', 'changed': 0}
+            rc, before = routeros.ssh_exec(hv, lu, kh, 'uci show 2>/dev/null | sort', key=lk, timeout=60)
+            before = before if rc == 0 else None
+            rc, out = routeros.ssh_exec(hv, cu, kh, 'mkdir -p "$R/tmp/asm-guard" && cat > "$R/tmp/asm-guard/guard.sh" '
+                                                    '&& %s arm %d' % (G.replace('/tmp', '"$R"/tmp'), window),
+                                        key=ck, timeout=60, stdin=guard)
+            if rc != 0 or 'armed:' not in out:
+                r.update(outcome='not-armed', detail='the guard did not arm, so nothing was changed: %s' %
+                         out.strip()[-300:])
+                note('%s: %s' % (host, r['detail']))
+                continue
+            r['deadline'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() + window))
+            note('%s: guard armed' % host)
+            doc, err, prc = run_playbook(self.cfg, path, vf, limit=host, timeout=window)
+            failed = None
+            for task in (doc or {}).get('tasks', []):
+                e = task.get('hosts', {}).get(host)
+                if not e:
+                    continue
+                if e.get('status') == 'changed' or (task['action'].endswith('raw') and e.get('status') == 'ok'):
+                    r['changed'] += 1
+                if e.get('status') in ('failed', 'unreachable'):
+                    failed = '%s: %s' % (task['name'], str(e.get('msg') or e.get('stderr') or '').strip()[:400])
+                    break
+            if doc is None and not failed:
+                failed = 'ansible did not finish: %s' % err[-400:]
+            gx = G.replace('/tmp', '"$R"/tmp')
+
+            def guard_cmd(action):
+                return routeros.ssh_exec(hv, cu, kh, '%s %s' % (gx, action), key=ck, timeout=60)
+            if failed:
+                rc, out = guard_cmd('revert failed')
+                r.update(outcome='reverted-now' if 'reverted' in out else 'not-confirmed',
+                         failed_task=failed.split(':', 1)[0], detail=failed)
+            else:
+                rc, fresh = routeros.ssh_exec(hv, lu, kh, 'true', key=lk, timeout=30)
+                r['checks'] = [{'check': 'ssh', 'ok': rc == 0, 'detail': 'fresh login as %s' % lu if rc == 0
+                                else fresh.strip()[-200:]}]
+                bad = rc != 0
+                for c in checks:
+                    if c in ('ssh', 'ping') or bad:
+                        continue
+                    crc, cout = routeros.ssh_exec(hv, cu, kh, c, key=ck, timeout=60)
+                    r['checks'].append({'check': c, 'ok': crc == 0, 'detail': cout.strip()[-200:]})
+                    bad = bad or crc != 0
+                if bad:
+                    rc, out = guard_cmd('revert check-failed')
+                    if 'reverted' in out:
+                        r.update(outcome='reverted-now', detail='a check failed after the change')
+                    else:
+                        r.update(outcome='not-confirmed', detail='a check failed and the device could not be reached '
+                                                                 'to revert now; it reverts at its deadline')
+                else:
+                    rc, out = guard_cmd('cancel')
+                    if 'cancelled' in out:
+                        r['outcome'] = 'confirmed'
+                    else:
+                        r.update(outcome='not-confirmed', detail='could not cancel the guard: %s' % out.strip()[-200:])
+            note('%s: %s' % (host, r['outcome']))
+            if before is not None:
+                time.sleep(2 if r['outcome'] == 'reverted-now' else 0)
+                rc, after = routeros.ssh_exec(hv, lu, kh, 'uci show 2>/dev/null | sort', key=lk, timeout=60)
+                if rc == 0:
+                    import difflib as _d
+                    diff = list(_d.unified_diff(before.splitlines(), after.splitlines(), 'before', 'after',
+                                                lineterm='', n=0))
+                    r['export_diff'] = '\n'.join(diff[:80]) if diff else '(no difference)'
+        job = self._load_job(job_id)
+        job.update(status='done', finished=time.time(), results=results)
+        self._save_job(job)
+        self.audit.write('job', summary='%s %s' % (job_id, ', '.join('%s=%s' % (h, r['outcome'])
+                                                                    for h, r in sorted(results.items()))))
 
     def _run_routeros(self, job_id, path, vf, targets, checks, window):
         jd = os.path.join(self.cfg.jobs, job_id)
@@ -1648,7 +1796,7 @@ class Server:
                 job = self._load_job(job_id)
             return self._job_text(job_id)
         if action in ('extend', 'revert'):
-            if job.get('kind') == 'routeros':
+            if job.get('kind') in ('routeros', 'openwrt'):
                 raise ToolError('RouterOS changes are confirmed or undone within the apply itself (Safe Mode); there is '
                                 'no open window to extend or revert afterwards.')
             if action == 'extend':

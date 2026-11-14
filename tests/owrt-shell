@@ -1,0 +1,4 @@
+#!/bin/sh
+# Stand-in for an OpenWrt login: refuses new logins while "$R/etc/config/locked" exists (a change that locked us out).
+[ -e "$R/etc/config/locked" ] && { echo "Permission denied (locked out)" >&2; exit 255; }
+exec /bin/sh -c "${SSH_ORIGINAL_COMMAND:-sh}"

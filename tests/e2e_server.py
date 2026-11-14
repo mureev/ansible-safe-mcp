@@ -227,6 +227,55 @@ if os.path.exists('/usr/local/bin/fakeros'):
     check('routeros: a bad command undoes the whole change', 'REVERTED' in t and
           '9.9.9.9' not in open('/tmp/fakeros/config').read(), t)
 
+# ---- OpenWrt, against a stand-in account (owrt: R=/tmp/fakeowrt, see tests/README.md)
+if os.path.exists('/usr/local/bin/owrt-shell'):
+    shutil.rmtree('/tmp/fakeowrt', ignore_errors=True)
+    os.makedirs('/tmp/fakeowrt/etc/config')
+    os.makedirs('/tmp/fakeowrt/tmp')
+    with open('/tmp/fakeowrt/etc/config/network', 'w') as f:
+        f.write("config interface 'lan'\n\toption proto 'static'\n")
+    subprocess.run(['chown', '-R', 'owrt', '/tmp/fakeowrt'])
+    t, e = tool('hosts', action='add', name='owrt', address='127.0.0.1', port=2222, kind='openwrt', look_user='owrt',
+                change_user='owrt', key_file=os.environ.get('ASM_TEST_KEY', '/root/.ssh/asm_test'))
+    check('openwrt: add a one-account host, both checks', not e and 'can write /etc/config' in t, t)
+    t, e = tool('look', hosts='owrt', command='uci show')
+    check('openwrt: look', "network: config interface 'lan'" in t, t)
+    good = """- hosts: owrt
+  gather_facts: false
+  tasks:
+    - name: add a config
+      ansible.builtin.raw: printf 'config asm\\n' > "$R/etc/config/asmtest"
+"""
+    tool('playbook', action='write', path='playbooks/owrt-good.yml', content=good)
+    t, e = tool('plan', playbook='playbooks/owrt-good.yml')
+    check('openwrt: plan lists the commands', 'on-device guard' in t and 'asmtest' in t, t)
+    t, e = tool('apply', playbook='playbooks/owrt-good.yml', window='60s')
+    check('openwrt: confirmed, uci diff shown', 'CONFIRMED' in t and '+asmtest: config asm' in t, t)
+    lock = """- hosts: owrt
+  gather_facts: false
+  tasks:
+    - ansible.builtin.raw: touch "$R/etc/config/locked"
+"""
+    tool('playbook', action='write', path='playbooks/owrt-lock.yml', content=lock)
+    t0 = time.time()
+    t, e = tool('apply', playbook='playbooks/owrt-lock.yml', window='20s')
+    check('openwrt: lockout NOT CONFIRMED', 'NOT CONFIRMED' in t and os.path.exists('/tmp/fakeowrt/etc/config/locked'), t)
+    time.sleep(max(0, 26 - (time.time() - t0)))
+    check('openwrt: the device put itself back', not os.path.exists('/tmp/fakeowrt/etc/config/locked'))
+    t, e = tool('look', hosts='owrt', read='guard')
+    check('openwrt: guard status shows the revert', 'reverted' in t and '(timeout)' in t, t)
+    bad = """- hosts: owrt
+  gather_facts: false
+  tasks:
+    - ansible.builtin.raw: echo half > "$R/etc/config/half"
+    - ansible.builtin.raw: exit 3
+"""
+    tool('playbook', action='write', path='playbooks/owrt-bad.yml', content=bad)
+    t, e = tool('apply', playbook='playbooks/owrt-bad.yml', window='60s')
+    check('openwrt: a failing command undoes the whole change', 'REVERTED' in t and
+          not os.path.exists('/tmp/fakeowrt/etc/config/half') and
+          os.path.exists('/tmp/fakeowrt/etc/config/asmtest'), t)
+
 lines = open(W + '/state/audit.jsonl').read().splitlines()
 ok = True
 prev = '0' * 64

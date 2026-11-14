@@ -8,6 +8,7 @@ Both suites need a disposable Linux box they may break, with sshd on 127.0.0.1:2
 | `look` | bash | none |
 | `change` | bash | `NOPASSWD: ALL` |
 | `rlook`, `rchange` | `ForceCommand /usr/local/bin/fakeros` (copy `tests/fakeros` there) | none |
+| `owrt` | `SetEnv R=/tmp/fakeowrt`, `ForceCommand /usr/local/bin/owrt-shell` (copy `tests/owrt-shell` there, and `tests/fake-uci` to `/usr/local/bin/uci`) | none |
 
 `fakeros` is a small stand-in for a RouterOS console: exec commands change `/tmp/fakeros/config`; an interactive
 session has Safe Mode (Ctrl+X), Ctrl+D undoes, `/quit` keeps, an abnormal end undoes; `/lock` refuses every new login
@@ -15,4 +16,4 @@ until a revert. It tests the server's handling of Safe Mode, not RouterOS itself
 
 - `collections/ansible_collections/mureev/confirmed/tests/e2e/run.sh` (with `ANSIBLE_CONFIG` pointing at an inventory
   for the box): the collection.
-- `python3 tests/e2e_server.py`: the MCP server over stdio, 36 checks.
+- `python3 tests/e2e_server.py`: the MCP server over stdio, 44 checks.

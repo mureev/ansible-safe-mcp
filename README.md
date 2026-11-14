@@ -4,7 +4,7 @@
 
 **Run Ansible from Claude. Every change undoes itself unless it's confirmed.**
 
-![Status](https://img.shields.io/badge/status-0.1%20preview%20%C2%B7%20Linux%20hosts-d29922)
+![Status](https://img.shields.io/badge/status-0.2%20preview-d29922)
 ![Ansible](https://img.shields.io/badge/ansible--core-2.17%2B-EE0000)
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -17,7 +17,7 @@ If Claude can still reach the host afterwards, the change is kept. If it can't, 
 </div>
 
 > [!NOTE]
-> **0.1 preview.** Changes are guarded on **Linux** hosts and **MikroTik RouterOS** (Safe Mode). Tested end
+> **0.2 preview.** Changes are guarded on **Linux**, **MikroTik RouterOS** (Safe Mode) and **OpenWrt**. Tested end
 > to end against a real SSH server, including a change that locks Ansible out and a host that puts itself back
 > ([tests](#tests)). Not yet on Galaxy or in the MCP directories. The [roadmap](#roadmap) says what comes next.
 
@@ -68,7 +68,7 @@ change.
 | Windows | one-time scheduled task as SYSTEM | registry keys, files, firewall export, service config | import, restore, restart services |
 | macOS | LaunchDaemon that rereads its deadline at boot | files, `defaults export`, `pf` rules | restore, restart services |
 | MikroTik RouterOS | Safe Mode, held by the server for the change (the router undoes it if the session ends abnormally) | the router's own Safe Mode history | Ctrl+D; or the router itself when the session drops |
-| OpenWrt | native: rpcd `uci apply` with rollback | rpcd's own, plus a `sysupgrade -b` archive for non-UCI files | rpcd restores |
+| OpenWrt | a timer process on the device, in RAM (no Python needed) | `/etc/config`, dropbear, crontabs, firewall and passwd files, in `/tmp` | restore, `reload_config` |
 
 ## What it looks like
 
@@ -108,7 +108,7 @@ change.
 | `playbook` | Create, edit and list playbooks in the project folder (a git repo). Lint runs on every save. | no |
 | `plan` | `--check --diff` for a playbook and a host list: what would change, per host. | no |
 | `apply` | Run a playbook for real, under the guard: arm, apply, verify over a fresh connection, confirm or let it revert. | **once per playbook version** |
-| `hands` *(0.2)* | A one-off change ("remote hands"): Claude's steps become a generated playbook under the same guard, saved to `oneoffs/`. | **yes, each time** |
+| `hands` | A one-off change ("remote hands"): Claude's steps become a generated playbook under the same guard, saved to `oneoffs/`. | **yes, each time** |
 | `job` | Follow a running change; extend its window; revert it now. | no |
 | `status` | Pending windows, recent reverts, what the lint guard refused, and the audit log. | no |
 
@@ -197,11 +197,12 @@ JSON on stdin and approves by exiting 0).
 - `collections/ansible_collections/mureev/confirmed/tests/e2e/`: the collection against a real SSH host: a confirmed
   change stays; a failed check reverts at once; a second arm is refused; and a `DenyUsers` change that locks Ansible
   out is put back by the host at the deadline.
-- `tests/e2e_server.py`: the MCP server over stdio, 36 checks: adding a host, reads as the look account (not
+- `tests/e2e_server.py`: the MCP server over stdio, 44 checks: adding a host, reads as the look account (not
   templated, no sudo), every lint refusal, plan, approve once, rerun without asking, edited playbook asks again,
   decline, a half-failed change reverted at once, the lockout, a tampered inventory, the audit log's hash chain, and
   RouterOS under Safe Mode against a stand-in console (confirm; a lockout undone through the held session; a bad
-  command undoing the whole change).
+  command undoing the whole change), and OpenWrt against a stand-in account (confirm with a uci diff; a lockout the
+  device reverts by itself; a failing command undone at once).
 
 Both need a disposable host they may break: see [tests/README.md](tests/README.md). `ansible-test sanity` passes on
 the collection.
@@ -215,8 +216,8 @@ under Safe Mode; a change with a typo in its second command undone as a whole, t
 | Version | Adds |
 |---|---|
 | **0.1** ✓ | The collection for Linux; the MCP server with `hosts`, `look`, `playbook`, `plan`, `apply`, `job`, `status`; approval once per playbook version, with declared parameters; lint guard; audit log; RouterOS changes under Safe Mode held by the server |
-| 0.2 | Windows and OpenWrt; `hands` (one-off changes); the collection on Galaxy |
-| 0.3 | macOS hosts |
+| **0.2** | `hands` (one-off changes); OpenWrt; apply as a job that answers while you decide; the collection on Galaxy |
+| 0.3 | macOS and Windows hosts |
 | 0.4 | Every run inside a macOS sandbox (the [mac-terminal](https://github.com/mureev/mac-terminal-mcp) fence); Touch ID approvals |
 
 ## License

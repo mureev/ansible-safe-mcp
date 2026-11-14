@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="404" viewBox="0 0 760 404" role="img">
+  <title>ansible-safe-mcp: a change that would have locked you out undoes itself</title>
+  <rect x="0" y="0" width="760" height="404" rx="10" fill="#0d1117"/>
+  <rect x="0" y="0" width="760" height="34" rx="10" fill="#161b22"/>
+  <rect x="0" y="24" width="760" height="10" fill="#161b22"/>
+  <circle cx="20" cy="17" r="6" fill="#ff5f56"/>
+  <circle cx="40" cy="17" r="6" fill="#ffbd2e"/>
+  <circle cx="60" cy="17" r="6" fill="#27c93f"/>
+  <text x="380" y="22" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" fill="#8b949e">Claude · ansible-safe-mcp</text>
+  <g font-family="SFMono-Regular,Menlo,Consolas,monospace" font-size="13" xml:space="preserve" style="white-space:pre">
+    <text x="22" y="64" fill="#e6edf3"><tspan fill="#d2a8ff">you</tspan>      Move edge-router's management to VLAN 99 and stop SSH on the LAN.</text>
+
+    <text x="22" y="96" fill="#8b949e"><tspan fill="#79c0ff">plan</tspan>     edge-router   3 changes: +vlan99  ~ip service ssh  +firewall rule</text>
+    <text x="22" y="118" fill="#8b949e"><tspan fill="#79c0ff">approve</tspan>  yes            revert window 10 min, on the router's clock</text>
+    <text x="22" y="140" fill="#8b949e"><tspan fill="#79c0ff">arm</tspan>      snapshot saved, scheduler <tspan fill="#e6edf3">safe-7f3a</tspan> set for 21:14</text>
+    <text x="22" y="162" fill="#8b949e"><tspan fill="#79c0ff">apply</tspan>    3 changed</text>
+    <text x="22" y="184" fill="#8b949e"><tspan fill="#79c0ff">verify</tspan>   fresh SSH to edge-router … <tspan fill="#ff7b72">timed out</tspan></text>
+    <text x="22" y="206" fill="#ffa657">         not confirmed: the router will undo this at 21:14</text>
+
+    <text x="22" y="240" fill="#6e7681">         · · ·  ten minutes later  · · ·</text>
+
+    <text x="22" y="274" fill="#8b949e"><tspan fill="#79c0ff">look</tspan>     edge-router   <tspan fill="#3fb950">reachable</tspan></text>
+    <text x="22" y="296" fill="#8b949e">         note on host: change <tspan fill="#e6edf3">7f3a</tspan> <tspan fill="#3fb950">reverted at 21:14</tspan>, never confirmed</text>
+
+    <text x="22" y="330" fill="#e6edf3"><tspan fill="#d2a8ff">claude</tspan>   The router put itself back. The plan had no untagged port</text>
+    <text x="22" y="350" fill="#e6edf3">         for this Mac on VLAN 99, so the new path never came up.</text>
+    <text x="22" y="370" fill="#e6edf3">         Here is the fixed plan: add ether2 to VLAN 99 first.</text>
+  </g>
+</svg>

@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="496" viewBox="0 0 760 496" role="img" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Inter,Helvetica,Arial,sans-serif">
+<defs><marker id="mn" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8b949e"/></marker><marker id="mr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#d29922"/></marker></defs>
+<title>Five gates between Claude and your hosts: a read-only account, a lint guard that keeps code off your Mac, your approval of each playbook version, an undo armed on the host before any change, and proof over a brand-new connection. Every way out is safe: before the change nothing has run; after it the host restores itself.</title>
+<rect x="0.5" y="0.5" width="759" height="495" rx="10" fill="#0d1117" stroke="#30363d" />
+<text x="24" y="36" font-size="17" fill="#e6edf3" font-weight="600" text-anchor="start" >Five gates between Claude and your hosts</text>
+<text x="24" y="58" font-size="13" fill="#8b949e" font-weight="400" text-anchor="start" >Each one can stop a change. None of the ways out leaves a host half-changed.</text>
+<text x="560" y="90" font-size="11.5" fill="#8b949e" font-weight="600" text-anchor="start" >if it stops here</text>
+<line x1="46" y1="116" x2="46" y2="430" stroke="#30363d" stroke-width="2"/>
+<circle cx="46" cy="116" r="13" fill="#161b22" stroke="#79c0ff" stroke-width="1.6"/>
+<text x="46" y="120.5" font-size="12.5" fill="#79c0ff" font-weight="700" text-anchor="middle" >1</text>
+<text x="74" y="121" font-size="14" fill="#e6edf3" font-weight="600" text-anchor="start" >Look</text>
+<text x="150" y="121" font-size="12.5" fill="#e6edf3" font-weight="400" text-anchor="start" >Claude explores as an account that can’t change anything:</text>
+<text x="150" y="139" font-size="12.5" fill="#8b949e" font-weight="400" text-anchor="start" >no sudo, not in the docker group, read-only on routers.</text>
+<path d="M540,116 L556,116" stroke="#8b949e" stroke-width="1.6" marker-end="url(#mn)"/>
+<rect x="560" y="102" width="176" height="28" rx="14" fill="#161b22" stroke="#30363d" />
+<text x="648" y="120.5" font-size="12" fill="#e6edf3" font-weight="500" text-anchor="middle" >denied, nothing changes</text>
+<circle cx="46" cy="180" r="13" fill="#161b22" stroke="#79c0ff" stroke-width="1.6"/>
+<text x="46" y="184.5" font-size="12.5" fill="#79c0ff" font-weight="700" text-anchor="middle" >2</text>
+<text x="74" y="185" font-size="14" fill="#e6edf3" font-weight="600" text-anchor="start" >Lint</text>
+<text x="150" y="185" font-size="12.5" fill="#e6edf3" font-weight="400" text-anchor="start" >Nothing in a playbook may run on your Mac: delegate_to,</text>
+<text x="150" y="203" font-size="12.5" fill="#8b949e" font-weight="400" text-anchor="start" >lookups, local plays and the rest are refused project-wide.</text>
+<path d="M540,180 L556,180" stroke="#8b949e" stroke-width="1.6" marker-end="url(#mn)"/>
+<rect x="560" y="166" width="176" height="28" rx="14" fill="#161b22" stroke="#30363d" />
+<text x="648" y="184.5" font-size="12" fill="#e6edf3" font-weight="500" text-anchor="middle" >refused, nothing runs</text>
+<circle cx="46" cy="244" r="13" fill="#161b22" stroke="#79c0ff" stroke-width="1.6"/>
+<text x="46" y="248.5" font-size="12.5" fill="#79c0ff" font-weight="700" text-anchor="middle" >3</text>
+<text x="74" y="249" font-size="14" fill="#e6edf3" font-weight="600" text-anchor="start" >Your yes</text>
+<text x="150" y="249" font-size="12.5" fill="#e6edf3" font-weight="400" text-anchor="start" >You approve the plan (check mode + diff) once per playbook</text>
+<text x="150" y="267" font-size="12.5" fill="#8b949e" font-weight="400" text-anchor="start" >version. Keychain-signed; edit one byte and it asks again.</text>
+<path d="M540,244 L556,244" stroke="#8b949e" stroke-width="1.6" marker-end="url(#mn)"/>
+<rect x="560" y="230" width="176" height="28" rx="14" fill="#161b22" stroke="#30363d" />
+<text x="648" y="248.5" font-size="12" fill="#e6edf3" font-weight="500" text-anchor="middle" >declined, nothing runs</text>
+<circle cx="46" cy="308" r="13" fill="#161b22" stroke="#79c0ff" stroke-width="1.6"/>
+<text x="46" y="312.5" font-size="12.5" fill="#79c0ff" font-weight="700" text-anchor="middle" >4</text>
+<text x="74" y="313" font-size="14" fill="#e6edf3" font-weight="600" text-anchor="start" >Arm</text>
+<text x="150" y="313" font-size="12.5" fill="#e6edf3" font-weight="400" text-anchor="start" >A snapshot and a revert timer go onto the host itself,</text>
+<text x="150" y="331" font-size="12.5" fill="#8b949e" font-weight="400" text-anchor="start" >and are checked, before the first task runs.</text>
+<path d="M540,308 L556,308" stroke="#8b949e" stroke-width="1.6" marker-end="url(#mn)"/>
+<rect x="560" y="294" width="176" height="28" rx="14" fill="#161b22" stroke="#30363d" />
+<text x="648" y="312.5" font-size="12" fill="#e6edf3" font-weight="500" text-anchor="middle" >not armed, not applied</text>
+<circle cx="46" cy="372" r="13" fill="#161b22" stroke="#79c0ff" stroke-width="1.6"/>
+<text x="46" y="376.5" font-size="12.5" fill="#79c0ff" font-weight="700" text-anchor="middle" >5</text>
+<text x="74" y="377" font-size="14" fill="#e6edf3" font-weight="600" text-anchor="start" >Prove</text>
+<text x="150" y="377" font-size="12.5" fill="#e6edf3" font-weight="400" text-anchor="start" >Claude must reach the host over a brand-new connection</text>
+<text x="150" y="395" font-size="12.5" fill="#8b949e" font-weight="400" text-anchor="start" >(an old one can outlive a firewall) and pass your checks.</text>
+<path d="M540,372 L556,372" stroke="#d29922" stroke-width="1.6" marker-end="url(#mr)"/>
+<rect x="560" y="358" width="176" height="28" rx="14" fill="#2b2111" stroke="#d29922" />
+<text x="648" y="376.5" font-size="12" fill="#d29922" font-weight="600" text-anchor="middle" >host restores itself</text>
+<circle cx="46" cy="442" r="13" fill="#12261a" stroke="#3fb950" stroke-width="1.6"/>
+<path d="M40,442 L44.5,447 L52.5,437" fill="none" stroke="#3fb950" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="74" y="447" font-size="14" fill="#3fb950" font-weight="600" text-anchor="start" >Confirmed</text>
+<text x="162" y="447" font-size="12.5" fill="#e6edf3" font-weight="400" text-anchor="start" >The timer is cancelled and the change is kept. Everything above is in a</text>
+<text x="162" y="465" font-size="12.5" fill="#8b949e" font-weight="400" text-anchor="start" >hash-chained audit log; a revert also leaves a note on the host.</text>
+</svg>

@@ -27,7 +27,7 @@ ok() { printf '  \033[32m✓\033[0m %s\n' "$*"; }
 warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
 die() { printf '\033[31mSTOPPED:\033[0m %s\n' "$*"; exit 1; }
 
-[ "$(uname)" = Darwin ] || die "this installer is for macOS (the server itself runs anywhere: see the README)."
+[ "$(uname)" = Darwin ] || die "this installer is for macOS (the server itself runs anywhere: see AGENTS.md)."
 if [ -n "${MAC_TERMINAL:-}" ] && [ "$MODE" != check ]; then
   die "install.sh runs from your own Terminal, not through Claude's tools. --check is fine from anywhere."
 fi

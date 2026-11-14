@@ -80,17 +80,32 @@ def decode_output(stdout):
     return '\n'.join(out)
 
 
+def decode_console(data):
+    """PowerShell's own errors arrive in the console's OEM code page (cp866 on a Russian Windows), not UTF-8."""
+    try:
+        return data.decode('utf-8')
+    except UnicodeDecodeError:
+        pass
+
+    def score(s):
+        return sum(1 for ch in s if ch.isascii() or '\u0400' <= ch <= '\u04ff' or ch.isalpha())
+    best = max((data.decode(cp, 'replace') for cp in ('cp866', 'cp850', 'cp1251', 'cp1252')), key=score)
+    # the wrapper's own line (a long base64 iex) and its underline only bury the message
+    return '\n'.join(ln for ln in best.splitlines() if not re.match(r'^\+ (iex |~{8,})', ln.strip() + ' '))
+
+
 def win_exec(host, user, known_hosts, script, key=None, timeout=120):
     """Run a PowerShell script on a Windows host over a brand-new SSH connection. Returns (exit code, text)."""
     command, stdin = exec_for(script)
     try:
-        p = subprocess.run(ssh_base(host, user, known_hosts, key) + [command], capture_output=True, text=True,
-                           timeout=timeout, input=stdin, errors='replace')
+        p = subprocess.run(ssh_base(host, user, known_hosts, key) + [command], capture_output=True,
+                           timeout=timeout, input=stdin.encode('utf-8') if stdin else None)
     except subprocess.TimeoutExpired:
         return 124, 'timed out after %ds' % timeout
-    text = decode_output(p.stdout)
-    if p.returncode != 0 and p.stderr.strip():
-        text = (text + '\n' + p.stderr.strip()[-600:]).strip()
+    text = decode_output(p.stdout.decode('utf-8', 'replace'))
+    err = decode_console(p.stderr).strip()
+    if p.returncode != 0 and err:
+        text = (text + '\n' + err[-600:]).strip()
     return p.returncode, text
 
 

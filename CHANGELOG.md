@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0 (preview) — 2026-11-14
+
+- **Windows hosts**: a PowerShell guard in `C:\ProgramData\asm-guard` (ACL'd to SYSTEM and Administrators) snapshots
+  the registry keys and files you list and registers a one-time SYSTEM scheduled task that restores them at the
+  deadline, also after the PC was off. Tested on Windows 11 Home with a Russian locale (errors decoded from the
+  console code page).
+- **macOS hosts**: the server sends the collection's guard over SSH and arms it as a LaunchDaemon, so a Mac without
+  Python can still be changed under the guard. Reads go over plain SSH.
+- **Jump hosts**: `kind="jump"` bastions with their own account, key and pinned host key; hosts with `jump=<name>`
+  get a `ProxyCommand` the server writes and the inventory check recomputes.
+- README for people (two screens, new diagrams of why it's safe); everything for agents in `AGENTS.md`.
+
 ## 0.2.0 (preview) — 2026-11-14
 
 - **OpenWrt hosts**: an on-device guard (busybox sh, no Python), sent at arm time; it snapshots `/etc/config` and

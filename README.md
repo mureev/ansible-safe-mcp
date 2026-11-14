@@ -121,7 +121,8 @@ change.
 | Claude changes things you didn't approve | Two accounts per host. `look` uses one that can't change the system: on Linux and macOS no sudo beyond a short list of read commands, and not in the `docker` group (Docker's socket is root in disguise); a read-only group on RouterOS. Only `apply` and `hands` use the change account, and only with your yes. |
 | Approving so often you stop reading | You approve a **playbook version**, not a run: the hash of the playbook, the files it can pull in, the roles, and the exact hosts. An unchanged version reruns without asking; any change asks again, with the plan. Playbooks declare their parameters (`asm_params` in the first play's vars), so "add a VPN user called X" is approved once, not once per user. Parameter values are checked against the declaration, may not contain template braces, and reach Ansible marked `!unsafe`, so they are never evaluated. |
 | Someone else edits the approvals | Each approval is signed with a key kept in the macOS Keychain, which sandboxed shells can't read. An approval written by anything but this server doesn't verify. |
-| Someone else edits the inventory | The server refuses to run if the inventory holds anything its `hosts` tool wouldn't write: a connection variable, group variables, a jump command. |
+| Someone else edits the inventory | The server refuses to run if the inventory holds anything its `hosts` tool wouldn't write: a connection variable, group variables, a jump command that differs from the one it would generate. |
+| Hosts behind a bastion or a reverse tunnel | Add the bastion with `kind="jump"` (its own account, key and pinned host key), then hosts with `jump=<name>`. The server writes the `ProxyCommand`; jump hosts are never targets. |
 | A playbook runs code on **your** Mac | Playbooks run on the hosts, but some constructs run on the machine running Ansible: `delegate_to`, `local_action`, `connection: local`, plays on `localhost`, lookups and `with_<lookup>` loops, Jinja `include`/`import` and `__` internals, `src:` paths outside the project, `fetch`, connection and user variables, plugin folders and `ansible.cfg` next to playbooks. The lint guard refuses all of them in the whole project, and plan and apply don't run while anything is refused. The server writes its own `ansible.cfg` (YAML inventory only, no inventory scripts). Next: every run inside a macOS sandbox as well. |
 | A "dry run" that isn't one | `check_mode: false` makes a task run for real in check mode. The lint guard refuses it, so `plan` stays a plan. |
 | A playbook disables the guard | Lint refuses changes to the guard's own timers, tasks and scheduler entries. |
@@ -199,7 +200,7 @@ JSON on stdin and approves by exiting 0).
 - `collections/ansible_collections/mureev/confirmed/tests/e2e/`: the collection against a real SSH host: a confirmed
   change stays; a failed check reverts at once; a second arm is refused; and a `DenyUsers` change that locks Ansible
   out is put back by the host at the deadline.
-- `tests/e2e_server.py`: the MCP server over stdio, 44 checks: adding a host, reads as the look account (not
+- `tests/e2e_server.py`: the MCP server over stdio, 50 checks: adding a host, reads as the look account (not
   templated, no sudo), every lint refusal, plan, approve once, rerun without asking, edited playbook asks again,
   decline, a half-failed change reverted at once, the lockout, a tampered inventory, the audit log's hash chain, and
   RouterOS under Safe Mode against a stand-in console (confirm; a lockout undone through the held session; a bad

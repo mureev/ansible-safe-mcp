@@ -16,4 +16,4 @@ until a revert. It tests the server's handling of Safe Mode, not RouterOS itself
 
 - `collections/ansible_collections/mureev/confirmed/tests/e2e/run.sh` (with `ANSIBLE_CONFIG` pointing at an inventory
   for the box): the collection.
-- `python3 tests/e2e_server.py`: the MCP server over stdio, 44 checks.
+- `python3 tests/e2e_server.py`: the MCP server over stdio, 50 checks.

@@ -42,9 +42,22 @@ def ssh_base(host, user, known_hosts, key=None, tty=False):
         cmd += ['-tt', '-e', 'none']
     if key:
         cmd += ['-i', os.path.expanduser(key), '-o', 'IdentitiesOnly=yes']
-    if host.get('asm_jump'):
-        cmd += ['-J', host['asm_jump']]
+    if host.get('asm_proxy_command'):
+        cmd += ['-o', 'ProxyCommand=' + host['asm_proxy_command']]
     return cmd + ['%s@%s' % (user, host['ansible_host'])]
+
+
+def proxy_command(jump, known_hosts):
+    """How to reach a host through a jump host from the inventory: its own address, port, look account, key and
+    pinned host key, via ssh -W. Written by the server, never by hand (the inventory check recomputes it)."""
+    import shlex
+    cmd = ['ssh', '-o', 'BatchMode=yes', '-o', 'UserKnownHostsFile=' + known_hosts, '-o', 'StrictHostKeyChecking=yes',
+           '-o', 'ConnectTimeout=15', '-o', 'ControlMaster=no', '-o', 'ControlPath=none',
+           '-p', str(jump.get('ansible_port', 22))]
+    if jump.get('asm_look_key'):
+        cmd += ['-i', os.path.expanduser(jump['asm_look_key']), '-o', 'IdentitiesOnly=yes']
+    cmd += ['-W', '%h:%p', '%s@%s' % (jump['asm_look_user'], jump['ansible_host'])]
+    return ' '.join(shlex.quote(x) if x != '%h:%p' else x for x in cmd)
 
 
 def run_command(host, user, known_hosts, command, key=None, timeout=60):

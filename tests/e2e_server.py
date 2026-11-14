@@ -180,6 +180,35 @@ check('a hand-added connection variable in the inventory stops everything', e an
 open(inv, 'w').write(orig)
 t, e = tool('status', hosts='box')
 check('status', not e and 'approved playbook versions: 6' in t, t)
+# ---- a host reached through a jump host (as Kurs hosts are reached through veesp)
+KEY = os.environ.get('ASM_TEST_KEY', '/root/.ssh/asm_test')
+t, e = tool('hosts', action='add', name='jmp', address='127.0.0.1', port=2222, kind='jump', look_user='look',
+            key_file=KEY)
+check('jump: add a jump host (login + forwarding)', not e and 'logs in and forwards' in t, t)
+t, e = tool('hosts', action='add', name='behind', address='127.0.0.1', port=2222, look_user='look',
+            change_user='change', key_file=KEY, jump='jmp')
+check('jump: add a host behind it', not e and 'change account: logs in and can sudo' in t, t)
+t, e = tool('look', hosts='behind', command='id -un')
+check('jump: look through the jump host', '== behind\nlook' in t, t)
+behind = """- hosts: behind
+  become: true
+  gather_facts: false
+  tasks:
+    - ansible.builtin.copy: {dest: /etc/asm-behind, content: "via jump\\n"}
+"""
+tool('playbook', action='write', path='playbooks/behind.yml', content=behind)
+t, e = tool('apply', playbook='playbooks/behind.yml', window='60s')
+check('jump: a guarded change through the jump host, confirmed over a fresh connection',
+      'CONFIRMED' in t and open('/etc/asm-behind').read() == 'via jump\n', t)
+t, e = tool('apply', playbook='playbooks/behind.yml', limit='jmp')
+check('jump: a jump host is never a target', e, t)
+inv = W + '/project/inventory/hosts.yml'
+orig = open(inv).read()
+open(inv, 'w').write(orig.replace('-W %h:%p', '-W %h:%p -o ProxyCommand=evil', 1))
+t, e = tool('look', hosts='behind', command='id')
+check('jump: a hand-edited ProxyCommand stops everything', e and 'jump settings' in t, t)
+open(inv, 'w').write(orig)
+
 # ---- RouterOS, against the fake console (rlook/rchange on the same sshd; see tests/fakeros)
 if os.path.exists('/usr/local/bin/fakeros'):
     shutil.rmtree('/tmp/fakeros', ignore_errors=True)

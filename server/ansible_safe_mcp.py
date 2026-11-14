@@ -40,7 +40,7 @@ ADDR_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9.:_-]{0,252}$')
 USER_RE = re.compile(r'^[a-z_][a-z0-9_.-]{0,31}(\+[a-z0-9]{1,16})?$')
 PATTERN_RE = re.compile(r'^[A-Za-z0-9_.*:,!&\[\]-]{1,400}$')
 SAFE_STR = r'^[A-Za-z0-9 ._@:/+,=-]{0,200}$'
-KINDS = ('linux', 'routeros', 'openwrt')
+KINDS = ('linux', 'routeros', 'openwrt', 'jump')
 OPENWRT_GUARD = os.path.join(HERE, 'openwrt_guard.sh')
 MAX_TEXT = 24000
 
@@ -181,7 +181,7 @@ def save_inventory(cfg, inv):
 
 HOST_KEYS = {'ansible_host', 'ansible_port', 'ansible_ssh_common_args', 'ansible_network_os', 'asm_kind',
              'ansible_ssh_use_tty',
-             'asm_look_user', 'asm_change_user', 'asm_jump', 'asm_look_key', 'asm_change_key'}
+             'asm_look_user', 'asm_change_user', 'asm_jump', 'asm_look_key', 'asm_change_key', 'asm_proxy_command'}
 
 
 def migrate_inventory(cfg):
@@ -220,8 +220,13 @@ def check_inventory(cfg):
         for k, x in v.items():
             if k not in HOST_KEYS:
                 bad.append('%s.%s is not set by the hosts tool' % (name, k))
-            elif k == 'ansible_ssh_common_args' and not re.match(r'^-o ProxyJump=[A-Za-z0-9_.@:,-]+$', str(x)):
-                bad.append('%s.ansible_ssh_common_args may only hold a ProxyJump' % name)
+            elif k in ('ansible_ssh_common_args', 'asm_proxy_command', 'asm_jump'):
+                jump = hosts_of(inv).get(v.get('asm_jump'))
+                want = routeros.proxy_command(jump, cfg.known_hosts) if jump else None
+                if not want or v.get('asm_proxy_command') != want or \
+                        v.get('ansible_ssh_common_args') != '-o ProxyCommand=%s' % shlex.quote(want):
+                    bad.append('%s: the jump settings are not what the hosts tool writes for jump %r' % (
+                        name, v.get('asm_jump')))
             elif k == 'ansible_host' and (not ADDR_RE.match(str(x))):
                 bad.append('%s.ansible_host %r' % (name, x))
     for g, v in (inv['all'].get('children') or {}).items():
@@ -830,7 +835,7 @@ class Server:
         port = int(a.get('port') or 22)
         kind = a.get('kind', 'linux')
         look_u, change_u = a.get('look_user', ''), a.get('change_user', '')
-        jump = a.get('proxy_jump') or ''
+        jump = a.get('jump') or ''
         key_file = a.get('key_file') or ''
         look_key = a.get('look_key') or key_file
         change_key = a.get('change_key') or key_file
@@ -839,13 +844,22 @@ class Server:
             raise ToolError('address: a hostname or IP')
         if kind not in KINDS:
             raise ToolError('kind must be one of %s' % ', '.join(KINDS))
+        if kind == 'jump':
+            change_u = change_u or look_u
+            change_key = look_key
         if not (USER_RE.match(look_u) and USER_RE.match(change_u)):
             raise ToolError('look_user and change_user: account names on the host')
-        if kind != 'openwrt' and (look_u == change_u or look_u == 'root'):
+        if kind not in ('openwrt', 'jump') and (look_u == change_u or look_u == 'root'):
             raise ToolError('look_user and change_user are two different accounts on the host: one that can only '
                             'read, one that can change things (sudo); the look account must not be root')
-        if jump and not re.match(r'^[A-Za-z0-9_.@:-]{1,200}(,[A-Za-z0-9_.@:-]{1,200})*$', jump):
-            raise ToolError('proxy_jump: user@host[:port][,...]')
+        jump_host = None
+        if jump:
+            jump_host = hs.get(jump)
+            if not jump_host or jump_host.get('asm_kind') != 'jump':
+                raise ToolError('jump: the name of a host added with kind="jump" (add the jump host first)')
+        proxy = routeros.proxy_command(jump_host, self.cfg.known_hosts) if jump_host else ''
+        if kind == 'jump' and jump:
+            raise ToolError('a jump host is reached directly')
         for label, kf in (('key_file', key_file), ('look_key', look_key), ('change_key', change_key)):
             if kf and not os.path.isfile(os.path.expanduser(kf)):
                 raise ToolError('%s not found: %s' % (label, kf))
@@ -858,12 +872,14 @@ class Server:
         kh = os.path.join(d, 'known_hosts')
         cmd = ['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'UserKnownHostsFile=' + kh,
                '-o', 'ConnectTimeout=15', '-p', str(port)]
-        if jump:
-            cmd += ['-J', jump]
+        if proxy:
+            cmd += ['-o', 'ProxyCommand=' + proxy]
         if look_key:
             cmd += ['-i', look_key, '-o', 'IdentitiesOnly=yes']
         if kind == 'routeros':
             cmd += ['%s@%s' % (look_u, address), '/system identity print']
+        elif kind == 'jump':
+            cmd += ['-N', '-o', 'ExitOnForwardFailure=yes', '-W', '127.0.0.1:%d' % port, '%s@%s' % (look_u, address)]
         elif kind == 'openwrt':
             cmd += ['%s@%s' % (look_u, address), 'id -un; cat /etc/openwrt_release 2>/dev/null | head -3']
         else:
@@ -907,7 +923,8 @@ class Server:
             entry['asm_change_key'] = change_key
         if jump:
             entry['asm_jump'] = jump
-            entry['ansible_ssh_common_args'] = '-o ProxyJump=%s' % jump
+            entry['asm_proxy_command'] = proxy
+            entry['ansible_ssh_common_args'] = '-o ProxyCommand=%s' % shlex.quote(proxy)
         if kind == 'routeros':
             entry['ansible_network_os'] = 'community.routeros.routeros'
             entry['ansible_ssh_use_tty'] = False
@@ -924,8 +941,15 @@ class Server:
         return 'Added %s (%s).\n\n%s' % (name, fp.split(' ')[1] if ' ' in fp else fp, self._test_host(name))
 
     def _test_host(self, name):
+        check_inventory(self.cfg)
         hv = hosts_of(load_inventory(self.cfg))[name]
         kind = hv.get('asm_kind', 'linux')
+        if kind == 'jump':
+            base = routeros.ssh_base(hv, hv['asm_look_user'], self.cfg.known_hosts, hv.get('asm_look_key'))
+            p = subprocess.run(base[:-1] + ['-N', '-W', '127.0.0.1:%s' % hv.get('ansible_port', 22), base[-1]],
+                               capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+            ok = 'SSH-' in p.stdout
+            return 'jump account: %s' % ('logs in and forwards' if ok else 'FAILED: %s' % p.stderr.strip()[-300:])
         if kind == 'openwrt':
             out = []
             for account in ('look', 'change'):
@@ -1006,7 +1030,7 @@ class Server:
             tasks.append(('routeros', READS['routeros']['logs']))
         else:
             for kind in KINDS:
-                if read in READS[kind]:
+                if read in READS.get(kind, {}):
                     tasks.append((kind, READS[kind][read]))
             if not tasks:
                 raise ToolError('unknown read %r' % read)
@@ -1216,6 +1240,10 @@ class Server:
         unknown = [t for t in targets if t not in hs]
         if unknown:
             raise ToolError('not in the inventory: %s' % ', '.join(unknown))
+        jumps = [t for t in targets if hs[t].get('asm_kind') == 'jump']
+        if jumps:
+            raise ToolError('%s: jump hosts only carry connections; limit the playbook to other hosts' %
+                            ', '.join(jumps))
         return path, rel, limit, params, targets
 
     def _plan(self, path, limit, params):
@@ -1884,7 +1912,8 @@ TOOLS = [
          'look_user': STR, 'change_user': STR, 'key_file': STR,
          'look_key': {'type': 'string', 'description': 'key for the look account, if not key_file'},
          'change_key': {'type': 'string', 'description': 'key for the change account, if not key_file'},
-         'proxy_jump': {'type': 'string', 'description': 'user@jumphost[:port], for hosts behind a bastion'},
+         'jump': {'type': 'string', 'description': 'name of a host added with kind="jump" (a bastion, or the server '
+                                                   'a reverse tunnel ends on) to reach this host through'},
          'groups': {'type': 'array', 'items': STR}}, 'required': ['action']},
      'annotations': {'readOnlyHint': False, 'destructiveHint': False}},
     {'name': 'look', 'title': 'Look',

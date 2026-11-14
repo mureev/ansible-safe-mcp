@@ -9,7 +9,7 @@
 [![Galaxy](https://img.shields.io/badge/galaxy-mureev.confirmed-EE0000?logo=ansible&logoColor=white)](https://galaxy.ansible.com/ui/repo/published/mureev/confirmed/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-<img src="docs/why-safe.svg" width="760" alt="Where the undo lives. With Ansible's block/rescue the undo waits on your Mac, so a change that cuts SSH leaves the host locked. With ansible-safe-mcp the undo is armed on the host before the change, so the host restores itself at the deadline. The on-host undo per kind of host: Linux systemd timer, Windows SYSTEM task, macOS LaunchDaemon, RouterOS Safe Mode, OpenWrt timer in RAM.">
+<img src="docs/hero.svg" width="760" alt="A change cuts SSH. Who holds the undo? With plain Ansible the undo is on your Mac, so the server stays broken until you get there. With ansible-safe-mcp the undo is on the server, so it puts itself back at the deadline.">
 
 Claude writes the playbook, shows you the diff, and runs it under a timer that lives on the host.<br>
 To install it, give your agent this link:
@@ -28,7 +28,8 @@ The fear that stops people from letting an agent near their servers is specific:
 connection, and nobody can get back in.* Ansible's own safety net can't catch that, because the rescue runs on the
 machine that just lost the connection. Network gear solved this long ago with *commit confirmed*: apply, start a
 timer on the device, and roll back unless someone reconnects and says "keep it". This brings that to every host
-Ansible can reach, and puts four more gates in front of it:
+Ansible can reach (Linux: a systemd timer; Windows: a SYSTEM task; macOS: a LaunchDaemon; RouterOS: Safe Mode;
+OpenWrt: a timer in RAM), and puts four more gates in front of it:
 
 <img src="docs/gates.svg" width="760" alt="Five gates between Claude and your hosts: Look as a read-only account; Lint, so nothing runs on your Mac; your yes, once per playbook version, Keychain-signed; Arm, a snapshot and revert timer on the host before the first task; Prove, a brand-new connection and your checks. Stopping at gates 1 to 4 means nothing ran; failing gate 5 means the host restores itself. Passing all five: confirmed, kept.">
 

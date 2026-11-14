@@ -235,6 +235,16 @@ mac_bad = """- hosts: macbox
 tool('playbook', action='write', path='playbooks/mac-bad.yml', content=mac_bad)
 t, e = tool('apply', playbook='playbooks/mac-bad.yml', window='60s', paths=['/etc/asm-mac'])
 check('macos path: a failing command restores the file', 'REVERTED' in t and open('/etc/asm-mac').read() == 'mac\n', t)
+mac_mod = """- hosts: macbox
+  become: true
+  gather_facts: false
+  tasks:
+    - name: a module
+      ansible.builtin.copy: {dest: /etc/asm-mac, content: "x"}
+"""
+tool('playbook', action='write', path='playbooks/mac-mod.yml', content=mac_mod)
+t, e = tool('apply', playbook='playbooks/mac-mod.yml', window='60s', paths=['/etc/asm-mac'])
+check('macos path: refuses tasks that are not raw commands', e and 'raw commands only' in t and 'a module' in t, t)
 
 # ---- RouterOS, against the fake console (rlook/rchange on the same sshd; see tests/fakeros)
 if os.path.exists('/usr/local/bin/fakeros'):

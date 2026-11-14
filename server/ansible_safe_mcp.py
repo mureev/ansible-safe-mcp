@@ -703,6 +703,38 @@ def routeros_commands(path):
     return out
 
 
+def non_raw_tasks(path):
+    """Tasks in a playbook that aren't raw commands (Windows and macOS hosts run raw commands only)."""
+    try:
+        with open(path) as f:
+            docs = yaml.load(f, Loader=lint.Loader) or []
+    except (OSError, yaml.YAMLError):
+        return []
+    out = []
+    meta = {'name', 'when', 'tags', 'become', 'become_user', 'changed_when', 'failed_when', 'ignore_errors', 'vars',
+            'register', 'no_log', 'environment', 'args'}
+
+    def walk(tasks):
+        for t in tasks or []:
+            if not isinstance(t, dict):
+                continue
+            if any(k in t for k in ('block', 'rescue', 'always')):
+                for key in ('block', 'rescue', 'always'):
+                    walk(t.get(key))
+                continue
+            mods = [k for k in t if k not in meta]
+            if not any(_short(k) == 'raw' for k in mods):
+                out.append(t.get('name') or (mods[0] if mods else '?'))
+    for play in docs if isinstance(docs, list) else []:
+        if isinstance(play, dict):
+            for key in ('pre_tasks', 'tasks', 'post_tasks', 'handlers', 'roles'):
+                if key == 'roles' and play.get('roles'):
+                    out.append('roles')
+                else:
+                    walk(play.get(key))
+    return out
+
+
 def routeros_plan_text(path, targets):
     cmds = routeros_commands(path)
     lines = ['%s: under Safe Mode, %d command%s:' % (', '.join(targets), len(cmds), '' if len(cmds) == 1 else 's')]
@@ -1430,6 +1462,12 @@ class Server:
         for s in extra_services:
             if not isinstance(s, str) or not re.match(r'^[A-Za-z0-9@._-]{1,120}$', s):
                 raise ToolError('services: unit names')
+        if kind in ('macos', 'windows'):
+            other = non_raw_tasks(path)
+            if other:
+                raise ToolError('%s hosts run raw commands only (no Python needed there); these tasks are not: %s. '
+                                'Write them as ansible.builtin.raw commands.' % (
+                                    'macOS' if kind == 'macos' else 'Windows', ', '.join(map(str, other[:8]))))
         if kind == 'macos' and not extra_paths:
             raise ToolError('macOS changes need paths=[...]: the files and folders the commands change. Only those are '
                             'snapshotted and restored on a revert.')
@@ -1598,21 +1636,14 @@ class Server:
                 continue
             r['deadline'] = data.get('deadline_iso')
             note('%s: guard armed (%s)' % (host, data.get('backend')))
-            doc, err, prc = run_playbook(self.cfg, path, vf, limit=host, timeout=window)
             failed = None
-            for task in (doc or {}).get('tasks', []):
-                e = task.get('hosts', {}).get(host)
-                if not e:
-                    continue
-                if e.get('status') == 'changed' or (task['action'].endswith('raw') and e.get('status') == 'ok'):
-                    r['changed'] += 1
-                if e.get('status') in ('failed', 'unreachable'):
-                    out2 = re.sub(r'Shared connection to \S+ closed\.?', '',
-                                  (e.get('stdout') or '') + (e.get('stderr') or '')).strip()
-                    failed = '%s: exit %s%s' % (task['name'], e.get('rc'), (': ' + out2[:400]) if out2 else '')
+            for name, c in routeros_commands(path):
+                crc, cout = routeros.ssh_exec(hv, cu, kh, 'sudo -n /bin/sh -c %s' % q(c), key=ck,
+                                              timeout=max(30, min(window, 600)))
+                if crc != 0:
+                    failed = '%s: exit %s%s' % (name or c[:60], crc, (': ' + cout.strip()[-400:]) if cout.strip() else '')
                     break
-            if doc is None and not failed:
-                failed = 'ansible did not finish: %s' % err[-400:]
+                r['changed'] += 1
 
             def guard_cmd(action):
                 return routeros.ssh_exec(hv, cu, kh, '%s %s' % (G, action), key=ck, timeout=60)
@@ -1774,7 +1805,7 @@ class Server:
                 if e.get('status') == 'changed' or (task['action'].endswith('raw') and e.get('status') == 'ok'):
                     r['changed'] += 1
                 if e.get('status') in ('failed', 'unreachable'):
-                    out = ((e.get('stdout') or '') + (e.get('stderr') or '')).strip()
+                    out = ((e.get('stdout') or '') + (e.get('stderr') or '')).strip() or (e.get('msg') or '').strip()
                     out = re.sub(r'Shared connection to \S+ closed\.?', '', out).strip()
                     rc = e.get('rc')
                     failed = '%s: %s' % (task['name'], ('exit %s%s' % (rc, (': ' + out[:400]) if out else ''))

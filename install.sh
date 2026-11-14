@@ -150,6 +150,9 @@ cat <<EOF
 $(say "Next:")
   - Each host needs two accounts with your SSH key (from your ssh-agent): one that can only read (no sudo, not in
     the docker group), one with passwordless sudo. Then ask Claude to add the host: it shows you the host key first.
+  - macOS asks before a new program may reach your local network: the first time the server connects to a host on
+    your LAN, allow "Python" (or turn it on in System Settings > Privacy & Security > Local Network). Until then
+    LAN hosts fail with "No route to host".
   - Your playbooks live in $PROJECT (a git repo; every change Claude writes is a commit).
   - If you use mac-terminal-mcp, add ~/.local/state/ansible-safe-mcp to its deny_paths (policy.local.json) and
     reinstall it, so a sandboxed shell can't touch this server's state.

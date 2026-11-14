@@ -182,6 +182,21 @@ HOST_KEYS = {'ansible_host', 'ansible_port', 'ansible_ssh_common_args', 'ansible
              'asm_look_user', 'asm_change_user', 'asm_jump', 'asm_look_key', 'asm_change_key'}
 
 
+def migrate_inventory(cfg):
+    """0.1 kept one key per host as ansible_ssh_private_key_file; now each account has its own."""
+    inv = load_inventory(cfg)
+    changed = False
+    for name, v in hosts_of(inv).items():
+        old = v.pop('ansible_ssh_private_key_file', None)
+        if old:
+            v.setdefault('asm_look_key', old)
+            v.setdefault('asm_change_key', old)
+            inv['all']['hosts'][name] = v
+            changed = True
+    if changed:
+        save_inventory(cfg, inv)
+
+
 def check_inventory(cfg):
     """The inventory is the server's: refuse anything in it the hosts tool wouldn't have written (a connection
     variable added by hand or by another tool could make a play run on the Mac)."""
@@ -253,6 +268,16 @@ def yaml_val(v):
     if isinstance(v, dict):
         return '{' + ', '.join('%s: %s' % (json.dumps(str(k)), yaml_val(x)) for k, x in v.items()) + '}'
     raise TypeError(type(v))
+
+
+def unsafe_cmd(cmd):
+    """A command as an !unsafe YAML scalar. Ansible resolves the tagged value's type first, so a command like
+    `false` or `1` would arrive as a bool or a number: a leading space keeps it a string and changes nothing."""
+    try:
+        plain = isinstance(yaml.safe_load(cmd), str)
+    except yaml.YAMLError:
+        plain = True
+    return '!unsafe ' + json.dumps(cmd if plain else ' ' + cmd)
 
 
 def write_vars(path, account, values=None):
@@ -719,6 +744,7 @@ INSTRUCTIONS = """ansible-safe-mcp runs Ansible on the user's hosts. Changes und
 Workflow: hosts (list) -> look (read state; free, unprivileged) -> playbook (write a .yml under playbooks/) ->
 plan (check mode + diff; free) -> apply (asks the user once per playbook version, then runs under an on-host revert
 timer and keeps the change only after a fresh connection proves the host works) -> job (follow long runs).
+For a genuine one-off, hands writes the steps as a playbook in oneoffs/ and runs it the same way.
 
 Rules: show the user the plan before apply. Declare inputs that change per run as params in the first play's
 vars.asm_params (e.g. asm_params: {client: {type: str, pattern: '^[a-z0-9-]+$'}}) so one approval covers them.
@@ -733,6 +759,7 @@ class Server:
         self.cfg.setup()
         self.audit = Audit(self.cfg)
         self.approvals = Approvals(self.cfg)
+        migrate_inventory(self.cfg)
         self.jobs_lock = threading.Lock()
 
     # ---- tool: hosts
@@ -938,7 +965,7 @@ class Server:
             body += ['    - mureev.confirmed.status:', '      when: asm_kind | default("linux") == "linux"']
         for kind, c in tasks:
             mod = 'ansible.builtin.shell' if kind == 'linux' else 'ansible.builtin.raw'
-            body += ['    - name: %s' % kind, '      %s: !unsafe %s' % (mod, json.dumps(c)),
+            body += ['    - name: %s' % kind, '      %s: %s' % (mod, unsafe_cmd(c)),
                      '      changed_when: false', '      failed_when: false',
                      '      when: asm_kind | default("linux") == "%s"' % kind]
         with open(pb, 'w') as f:
@@ -1471,6 +1498,47 @@ class Server:
             lines.append('Ansible error:\n' + job['error'][-1500:])
         return '\n'.join(lines)
 
+    # ---- tool: hands
+    def t_hands(self, a):
+        """A one-off change: the steps become a playbook in oneoffs/, then run like apply (asks, guarded)."""
+        pattern = a.get('hosts', '')
+        if not PATTERN_RE.match(pattern or '') or re.search(r'localhost|127\.|::1', pattern):
+            raise ToolError('hosts: a host, group or pattern from the inventory')
+        steps = a.get('steps') or []
+        if not isinstance(steps, list) or not steps or not all(isinstance(x, str) and 0 < len(x) <= 4000
+                                                               for x in steps):
+            raise ToolError('steps: a list of shell commands (RouterOS commands for routers), one per step')
+        if len(steps) > 40:
+            raise ToolError('at most 40 steps in a one-off; write a playbook for more')
+        why = str(a.get('why') or '').strip()
+        if not why:
+            raise ToolError('why: one line saying what this fixes (it becomes the playbook name and the commit)')
+        hs = hosts_of(load_inventory(self.cfg))
+        kinds = {v.get('asm_kind', 'linux') for v in hs.values()}
+        slug = re.sub(r'[^a-z0-9]+', '-', why.lower()).strip('-')[:40] or 'oneoff'
+        rel = 'oneoffs/%s-%s.yml' % (time.strftime('%Y%m%d-%H%M'), slug)
+        routeros_task = a.get('kind') == 'routeros' or (kinds == {'routeros'})
+        mod = 'ansible.builtin.raw' if routeros_task else 'ansible.builtin.shell'
+        body = ['# One-off (hands): %s' % why.replace('\n', ' '), '- name: %s' % json.dumps(why[:120]),
+                '  hosts: %s' % json.dumps(pattern), '  gather_facts: false']
+        if not routeros_task:
+            body.append('  become: true')
+        body.append('  tasks:')
+        for i, step in enumerate(steps, 1):
+            body += ['    - name: %s' % json.dumps('step %d: %s' % (i, step.splitlines()[0][:80])),
+                     '      %s: %s' % (mod, unsafe_cmd(step))]
+        path = os.path.join(self.cfg.project, rel)
+        with open(path, 'w') as f:
+            f.write('\n'.join(body) + '\n')
+        self._commit('one-off %s' % rel)
+        if not routeros_task and not a.get('paths'):
+            return ('Wrote %s, but did not run it: shell steps are invisible to the plan, so tell me what they '
+                    'touch: paths=[...] (files and folders they create, change or delete; they are snapshotted and '
+                    'put back on a revert) and services=[...] to restart. Then call hands again or apply %s.' %
+                    (rel, rel))
+        return self.t_apply({'playbook': rel, 'window': a.get('window', '10m'), 'checks': a.get('checks'),
+                             'paths': a.get('paths'), 'services': a.get('services'), 'wait_s': a.get('wait_s', 60)})
+
     # ---- tool: job
     def t_job(self, a):
         job_id = a.get('id', '')
@@ -1623,6 +1691,21 @@ TOOLS = [
          'paths': {'type': 'array', 'items': STR, 'description': 'extra paths to snapshot (absolute)'},
          'services': {'type': 'array', 'items': STR, 'description': 'extra units to restart on a revert'},
          'wait_s': {'type': 'integer'}}, 'required': ['playbook']},
+     'annotations': {'readOnlyHint': False, 'destructiveHint': True}},
+    {'name': 'hands', 'title': 'Remote hands',
+     'description': 'A one-off change, for jobs that don\'t deserve a playbook yet: give the shell steps (RouterOS '
+                    'commands on routers), why, and on Linux the paths they touch and services to restart. They are '
+                    'saved as a playbook in oneoffs/ and run like apply: the user approves, the host arms a revert, '
+                    'the change must be confirmed over a fresh connection. Prefer a real playbook for anything '
+                    'repeated.',
+     'inputSchema': {'type': 'object', 'properties': {
+         'hosts': STR, 'why': {'type': 'string', 'description': 'one line: what this fixes'},
+         'steps': {'type': 'array', 'items': STR},
+         'paths': {'type': 'array', 'items': STR, 'description': 'Linux: files/folders the steps create, change or '
+                                                                 'delete (snapshotted, restored on a revert)'},
+         'services': {'type': 'array', 'items': STR}, 'window': STR,
+         'checks': {'type': 'array', 'items': STR}, 'wait_s': {'type': 'integer'}},
+         'required': ['hosts', 'why', 'steps']},
      'annotations': {'readOnlyHint': False, 'destructiveHint': True}},
     {'name': 'job', 'title': 'Jobs',
      'description': 'Follow an apply: status (optionally wait_s), list, extend (window) or revert (undo it now, '

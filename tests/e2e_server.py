@@ -52,7 +52,7 @@ def check(label, cond, detail=''):
 init = rpc('initialize', {'protocolVersion': '2025-06-18', 'capabilities': {}, 'clientInfo': {'name': 't'}})
 check('initialize', init['result']['serverInfo']['name'] == 'ansible-safe-mcp', json.dumps(init))
 names = [t['name'] for t in rpc('tools/list')['result']['tools']]
-check('7 tools', names == ['hosts', 'look', 'playbook', 'plan', 'apply', 'job', 'status'], str(names))
+check('8 tools', names == ['hosts', 'look', 'playbook', 'plan', 'apply', 'hands', 'job', 'status'], str(names))
 
 t, e = tool('hosts', action='add', name='box', address='127.0.0.1', port=2222, look_user='look',
             change_user='change', key_file=os.environ.get('ASM_TEST_KEY', '/root/.ssh/asm_test'), groups=['web'])
@@ -154,6 +154,15 @@ time.sleep(max(0, 26 - (time.time() - t0)))
 check('lockout: the host put itself back', not os.path.exists('/etc/ssh/sshd_config.d/50-lock.conf'))
 t, e = tool('look', hosts='box', read='guard')
 check('look guard reports the revert', 'reverted' in t and '(timeout)' in t, t)
+t, e = tool('hands', hosts='box', why='Clear a stale lock file', steps=['rm -f /etc/asm-stale.lock'])
+check('hands: refuses to run blind without paths', 'did not run it' in t and 'oneoffs/' in t, t)
+open('/etc/asm-stale.lock', 'w').write('x')
+t, e = tool('hands', hosts='box', why='Clear a stale lock file', steps=['rm -f /etc/asm-stale.lock'],
+            paths=['/etc/asm-stale.lock'], window='60s')
+check('hands: asks, runs guarded, confirms', 'CONFIRMED' in t and not os.path.exists('/etc/asm-stale.lock'), t)
+t, e = tool('hands', hosts='box', why='Break and notice', steps=['echo broken > /etc/asm-hands', 'false'],
+            paths=['/etc/asm-hands'], window='60s')
+check('hands: a failing step is undone at once', 'REVERTED' in t and not os.path.exists('/etc/asm-hands'), t)
 inv = W + '/project/inventory/hosts.yml'
 orig = open(inv).read()
 open(inv, 'w').write(orig.replace('asm_kind: linux', 'asm_kind: linux\n      ansible_connection: local'))
@@ -161,7 +170,7 @@ t, e = tool('look', hosts='box', read='overview')
 check('a hand-added connection variable in the inventory stops everything', e and 'ansible_connection' in t, t)
 open(inv, 'w').write(orig)
 t, e = tool('status', hosts='box')
-check('status', not e and 'approved playbook versions: 3' in t, t)
+check('status', not e and 'approved playbook versions: 5' in t, t)
 # ---- RouterOS, against the fake console (rlook/rchange on the same sshd; see tests/fakeros)
 if os.path.exists('/usr/local/bin/fakeros'):
     shutil.rmtree('/tmp/fakeros', ignore_errors=True)

@@ -182,6 +182,9 @@ server and the collection next to it, checks the copy answers the MCP handshake,
 nothing; `--remove` takes the entry and the copy out. Your playbooks live in `~/ansible-safe` (a git repo: every file
 Claude writes is a commit); state, approvals and the audit log in `~/.local/state/ansible-safe-mcp`.
 
+**Local Network:** macOS asks before a new program may reach devices on your LAN. Allow "Python" when it asks
+(or in System Settings → Privacy & Security → Local Network); until then LAN hosts fail with "No route to host".
+
 If you also use [mac-terminal-mcp](https://github.com/mureev/mac-terminal-mcp), add
 `~/.local/state/ansible-safe-mcp` to its `deny_paths`, so a sandboxed shell can't touch this server's state.
 

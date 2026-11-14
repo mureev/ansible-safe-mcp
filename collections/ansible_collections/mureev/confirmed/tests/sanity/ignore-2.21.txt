@@ -1,0 +1,5 @@
+plugins/modules/arm.py validate-modules:missing-gplv3-license # MIT-licensed collection
+plugins/modules/confirm.py validate-modules:missing-gplv3-license # MIT-licensed collection
+plugins/modules/extend.py validate-modules:missing-gplv3-license # MIT-licensed collection
+plugins/modules/revert.py validate-modules:missing-gplv3-license # MIT-licensed collection
+plugins/modules/status.py validate-modules:missing-gplv3-license # MIT-licensed collection

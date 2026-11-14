@@ -102,12 +102,13 @@ class ActionModule(ActionBase):
                 r = self._module('mureev.confirmed.revert',
                                  {'id': st.get('id'), 'why': 'check failed: %s' % failed[0], 'state_dir': sd},
                                  task_vars)
+                if r.get('state') == 'reverted':
+                    outcome = 'reverted now'
+                else:
+                    outcome = 'could not be reverted now (%s); the host reverts at %s' % (r.get('msg', ''), deadline)
                 result.update(failed=True, confirmed=False, reverted=r.get('state') == 'reverted',
-                              msg='NOT CONFIRMED: check %s failed; change %s %s.' % (
-                                  ', '.join(failed), st.get('id'),
-                                  'reverted now' if r.get('state') == 'reverted' else
-                                  'could not be reverted now (%s); the host reverts at %s' % (r.get('msg', ''),
-                                                                                             deadline)))
+                              msg='NOT CONFIRMED: check %s failed; change %s %s.' % (', '.join(failed), st.get('id'),
+                                                                                     outcome))
             else:
                 result.update(failed=True, confirmed=False, deadline_iso=deadline,
                               msg='NOT CONFIRMED: check %s failed. The host will undo change %s at %s.' % (

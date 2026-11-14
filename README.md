@@ -197,13 +197,18 @@ JSON on stdin and approves by exiting 0).
 - `collections/ansible_collections/mureev/confirmed/tests/e2e/`: the collection against a real SSH host: a confirmed
   change stays; a failed check reverts at once; a second arm is refused; and a `DenyUsers` change that locks Ansible
   out is put back by the host at the deadline.
-- `tests/e2e_server.py`: the MCP server over stdio, 31 checks: adding a host, reads as the look account (not
+- `tests/e2e_server.py`: the MCP server over stdio, 36 checks: adding a host, reads as the look account (not
   templated, no sudo), every lint refusal, plan, approve once, rerun without asking, edited playbook asks again,
   decline, a half-failed change reverted at once, the lockout, a tampered inventory, the audit log's hash chain, and
   RouterOS under Safe Mode against a stand-in console (confirm; a lockout undone through the held session; a bad
   command undoing the whole change).
 
-Both need a disposable host they may break: see [tests/README.md](tests/README.md).
+Both need a disposable host they may break: see [tests/README.md](tests/README.md). `ansible-test sanity` passes on
+the collection.
+
+**On real hardware** (November 2026): an Ubuntu server with systemd (a change kept after confirmation; a change left
+unconfirmed reverted by the systemd timer on the host) and a MikroTik hAP ax² on RouterOS 7.24.5 (a change confirmed
+under Safe Mode; a change with a typo in its second command undone as a whole, the export identical to before).
 
 ## Roadmap
 

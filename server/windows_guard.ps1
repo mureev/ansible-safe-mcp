@@ -28,6 +28,13 @@ function Log([string]$t) { Add-Content -LiteralPath (Join-Path $D 'guard.log') -
 function Last { $f = Join-Path $D 'last'; if (Test-Path -LiteralPath $f) { 'last=' + (Get-Content -LiteralPath $f -Raw).Trim() } }
 function RegPath([string]$p) { ($p -replace '^(HKLM|HKCU|HKCR|HKU|HKCC):', '$1').TrimEnd('\') }
 function IsReg([string]$p) { $p -match '^(HKLM|HKCU|HKCR|HKU|HKCC):?\\' }
+# reg.exe writes "key not found" to stderr, and Windows PowerShell 5.1 turns native stderr into a terminating error
+# under $ErrorActionPreference = 'Stop': run it with Continue and judge it by its exit code only.
+function Reg {
+  $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+  try { & reg.exe @args 2>&1 | Out-Null; $code = $LASTEXITCODE } finally { $ErrorActionPreference = $old }
+  return $code
+}
 function Unregister { Unregister-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue }
 
 switch ($Action) {
@@ -48,10 +55,8 @@ switch ($Action) {
       if (IsReg $p) {
         $rp = RegPath $p
         $file = Join-Path $Snap ('reg' + $i + '.reg')
-        & reg.exe query $rp *> $null
-        if ($LASTEXITCODE -eq 0) {
-          & reg.exe export $rp $file /y *> $null
-          if ($LASTEXITCODE -ne 0) { Remove-Item -LiteralPath $Snap -Recurse -Force; "error=could not export $rp"; exit 4 }
+        if ((Reg query $rp) -eq 0) {
+          if ((Reg export $rp $file /y) -ne 0) { Remove-Item -LiteralPath $Snap -Recurse -Force; "error=could not export $rp"; exit 4 }
           $manifest += New-Object PSObject -Property @{ type = 'reg'; path = $rp; file = $file; present = $true }
         } else {
           $manifest += New-Object PSObject -Property @{ type = 'reg'; path = $rp; file = ''; present = $false }
@@ -113,9 +118,8 @@ switch ($Action) {
     foreach ($e in $manifest) {
       try {
         if ($e.type -eq 'reg') {
-          & reg.exe query $e.path *> $null
-          if ($LASTEXITCODE -eq 0) { & reg.exe delete $e.path /f *> $null }
-          if ($e.present) { & reg.exe import $e.file *> $null; if ($LASTEXITCODE -ne 0) { $fail += $e.path } }
+          if ((Reg query $e.path) -eq 0) { Reg delete $e.path /f | Out-Null }
+          if ($e.present -and (Reg import $e.file) -ne 0) { $fail += $e.path }
         } else {
           if (Test-Path -LiteralPath $e.path) { Remove-Item -LiteralPath $e.path -Recurse -Force }
           if ($e.present) { Copy-Item -LiteralPath $e.file -Destination $e.path -Recurse -Force }

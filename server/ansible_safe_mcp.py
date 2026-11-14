@@ -32,6 +32,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 import lint  # noqa: E402
 import routeros  # noqa: E402
+import windows  # noqa: E402
 
 VERSION = '0.2.0'
 PROTOCOLS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05']
@@ -40,7 +41,8 @@ ADDR_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9.:_-]{0,252}$')
 USER_RE = re.compile(r'^[a-z_][a-z0-9_.-]{0,31}(\+[a-z0-9]{1,16})?$')
 PATTERN_RE = re.compile(r'^[A-Za-z0-9_.*:,!&\[\]-]{1,400}$')
 SAFE_STR = r'^[A-Za-z0-9 ._@:/+,=-]{0,200}$'
-KINDS = ('linux', 'routeros', 'openwrt', 'jump')
+KINDS = ('linux', 'macos', 'routeros', 'openwrt', 'windows', 'jump')
+ANSIBLE_KINDS = ('linux', 'macos')  # Python on the host: the mureev.confirmed collection guards changes
 OPENWRT_GUARD = os.path.join(HERE, 'openwrt_guard.sh')
 MAX_TEXT = 24000
 
@@ -712,6 +714,26 @@ def openwrt_plan_text(path, targets):
     return '\n'.join(lines)
 
 
+def routeros_kv(text):
+    out = {}
+    for line in (text or '').splitlines():
+        k, sep, v = line.strip().partition('=')
+        if sep and re.match(r'^[a-z_]+$', k):
+            out[k] = v
+    return out
+
+
+def windows_plan_text(path, targets):
+    cmds = routeros_commands(path)
+    lines = ['%s: under the guard (snapshot of the paths you list + a one-time scheduled task as SYSTEM that restores '
+             'them), %d PowerShell command%s:' % (', '.join(targets), len(cmds), '' if len(cmds) == 1 else 's')]
+    for name, c in cmds[:60]:
+        lines.append('  > %s%s' % (c[:300], ('    # ' + name) if name else ''))
+    lines.append('  · apply needs paths=[...]: the registry keys (HKLM:\\...) and files the commands change; only those '
+                 'are restored on a revert')
+    return '\n'.join(lines)
+
+
 def plan_text(plan, stats=None):
     lines = []
     for h in sorted(plan):
@@ -766,6 +788,32 @@ READS = {
         'updates': '(opkg list-upgradable 2>/dev/null || apk list --upgradable 2>/dev/null) | head -50',
         'logs': 'logread | tail -n 200',
         'guard': 'sh "$R"/tmp/asm-guard/guard.sh status 2>/dev/null || echo "asm-guard: not armed"',
+    },
+    'macos': {
+        'overview': 'scutil --get ComputerName; sw_vers; uptime; echo; df -h / | tail -1; echo; '
+                    'vm_stat | head -6; echo; which python3; python3 --version 2>&1',
+        'services': 'launchctl list | head -150',
+        'disk': 'df -h; echo; du -xhd 1 / 2>/dev/null | sort -h | tail -15',
+        'updates': 'softwareupdate --history 2>/dev/null | tail -10',
+        'interfaces': 'ifconfig | grep -E "^[a-z]|inet "; echo; netstat -rn -f inet | head -15',
+        'logs': 'log show --last 1h --predicate "messageType == error" --style compact 2>/dev/null | tail -n 200',
+    },
+    'windows': {
+        'overview': "$o = Get-CimInstance Win32_OperatingSystem; $o.Caption + ' ' + $o.Version + ' build ' + $o.BuildNumber; "
+                    "'up since ' + $o.LastBootUpTime; 'memory free ' + [math]::Round($o.FreePhysicalMemory/1MB,1) + "
+                    "' of ' + [math]::Round($o.TotalVisibleMemorySize/1MB,1) + ' GB'; "
+                    "Get-PSDrive -PSProvider FileSystem | Format-Table Name,@{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}},"
+                    "@{n='UsedGB';e={[math]::Round($_.Used/1GB,1)}} -AutoSize",
+        'services': "Get-Service | Where-Object Status -eq Running | Sort-Object Name | Format-Table Name,DisplayName "
+                    "-AutoSize | Out-String -Width 200",
+        'disk': "Get-PSDrive -PSProvider FileSystem | Format-Table Name,Used,Free,Root -AutoSize",
+        'interfaces': "Get-NetIPAddress -AddressFamily IPv4 | Format-Table InterfaceAlias,IPAddress,PrefixLength "
+                      "-AutoSize; Get-NetRoute -DestinationPrefix 0.0.0.0/0 | Format-Table NextHop,InterfaceAlias -AutoSize",
+        'logs': "Get-WinEvent -FilterHashtable @{LogName='System','Application'; Level=1,2} -MaxEvents 50 "
+                "-ErrorAction SilentlyContinue | Format-Table TimeCreated,ProviderName,Id,Message -Wrap | "
+                "Out-String -Width 200",
+        'guard': "$g = Join-Path $env:ProgramData 'asm-guard\\guard.ps1'; if (Test-Path $g) { & $g -Action status } "
+                 "else { 'state=never armed' }",
     },
     'routeros': {
         'overview': '/system resource print',
@@ -849,7 +897,7 @@ class Server:
             change_key = look_key
         if not (USER_RE.match(look_u) and USER_RE.match(change_u)):
             raise ToolError('look_user and change_user: account names on the host')
-        if kind not in ('openwrt', 'jump') and (look_u == change_u or look_u == 'root'):
+        if kind not in ('openwrt', 'windows', 'macos', 'jump') and (look_u == change_u or look_u == 'root'):
             raise ToolError('look_user and change_user are two different accounts on the host: one that can only '
                             'read, one that can change things (sudo); the look account must not be root')
         jump_host = None
@@ -882,6 +930,8 @@ class Server:
             cmd += ['-N', '-o', 'ExitOnForwardFailure=yes', '-W', '127.0.0.1:%d' % port, '%s@%s' % (look_u, address)]
         elif kind == 'openwrt':
             cmd += ['%s@%s' % (look_u, address), 'id -un; cat /etc/openwrt_release 2>/dev/null | head -3']
+        elif kind == 'windows':
+            cmd += ['%s@%s' % (look_u, address), 'whoami']
         else:
             cmd += ['%s@%s' % (look_u, address), 'id -un; sudo -n true 2>/dev/null && echo SUDO-OK || echo NO-SUDO']
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=40, stdin=subprocess.DEVNULL)
@@ -894,10 +944,13 @@ class Server:
             raise ToolError('%s answered but the look account %s could not log in: %s' % (
                 address, look_u, p.stderr.strip()[-300:]))
         warn = ''
+        if kind in ('windows', 'macos') and look_u == change_u:
+            warn = ('\n\nNote: one account (%s) for reads and changes: reads still only read, but the account could '
+                    'change things.' % look_u)
         if kind == 'openwrt' and look_u == change_u:
             warn = ('\n\nNote: OpenWrt usually has one account, so reads run as %s too. They still only read, but '
                     'the account could change things.' % look_u)
-        if kind == 'linux' and 'SUDO-OK' in p.stdout:
+        if kind in ANSIBLE_KINDS and look_u != change_u and 'SUDO-OK' in p.stdout:
             warn = '\n\nWARNING: the look account can sudo without a password, so it is not read-only.'
         text = ('Add host %s\n\n%s port %d%s\nkind: %s\nlook account: %s\nchange account: %s\n\nHost key:\n%s%s' % (
             name, address, port, (' via ' + jump) if jump else '', kind, look_u, change_u, fp, warn))
@@ -950,6 +1003,17 @@ class Server:
                                capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
             ok = 'SSH-' in p.stdout
             return 'jump account: %s' % ('logs in and forwards' if ok else 'FAILED: %s' % p.stderr.strip()[-300:])
+        if kind == 'windows':
+            out = []
+            admin = ('([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent())'
+                     '.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)')
+            for account in ('look', 'change'):
+                rc, txt = windows.win_exec(hv, hv['asm_%s_user' % account], self.cfg.known_hosts,
+                                           'whoami; ' + admin, key=hv.get('asm_%s_key' % account), timeout=60)
+                ok = rc == 0 and (account == 'look' or txt.strip().endswith('True'))
+                what = 'logs in' + (' as an administrator' if account == 'change' else '')
+                out.append('%s account: %s' % (account, what if ok else 'FAILED: %s' % txt.strip()[-300:]))
+            return '\n'.join(out)
         if kind == 'openwrt':
             out = []
             for account in ('look', 'change'):
@@ -976,13 +1040,13 @@ class Server:
                 task = '    - ansible.builtin.ping:\n'
             with open(pb, 'w') as f:
                 f.write('- hosts: %s\n  gather_facts: false\n  become: %s\n  tasks:\n%s' % (
-                    name, 'true' if become and kind == 'linux' else 'false', task))
+                    name, 'true' if become and kind in ANSIBLE_KINDS else 'false', task))
             vf = os.path.join(d, 'vars.yml')
             write_vars(vf, account)
             doc, err, rc = run_playbook(self.cfg, pb, vf, timeout=90)
             st = ((doc or {}).get('tasks') or [{}])[-1].get('hosts', {}).get(name, {}) if doc else {}
             okay = st.get('status') in ('ok', 'changed')
-            what = 'logs in' + (' and can sudo' if become and kind == 'linux' else '')
+            what = 'logs in' + (' and can sudo' if become and kind in ANSIBLE_KINDS else '')
             out.append('%s account: %s' % (account, what if okay else 'FAILED: %s' % (st.get('msg') or err)[-300:]))
         shutil.rmtree(d, ignore_errors=True)
         return '\n'.join(out)
@@ -1008,6 +1072,7 @@ class Server:
             if not isinstance(command, str) or len(command) > 4000:
                 raise ToolError('command: a string up to 4000 characters')
             tasks.append(('linux', command))
+            tasks.append(('macos', command))
             tasks.append(('routeros', command))
         elif read == 'guard':
             pass
@@ -1051,6 +1116,17 @@ class Server:
                 rc, txt = routeros.ssh_exec(hv, hv['asm_look_user'], self.cfg.known_hosts, ow_cmd,
                                             key=hv.get('asm_look_key'), timeout=int(a.get('timeout') or 120))
                 per[h] = txt.rstrip() + ('' if rc == 0 else '\n[exit %s]' % rc)
+        win_hosts = [h for h in self._resolve(pattern) if hs.get(h, {}).get('asm_kind') == 'windows']
+        if win_hosts:
+            win_cmd = command or READS['windows'].get(read or '')
+            for h in win_hosts:
+                hv = hs[h]
+                if not win_cmd:
+                    per[h] = '(no %s read for Windows)' % read
+                    continue
+                rc, txt = windows.win_exec(hv, hv['asm_look_user'], self.cfg.known_hosts, win_cmd,
+                                           key=hv.get('asm_look_key'), timeout=int(a.get('timeout') or 120))
+                per[h] = txt.rstrip() + ('' if rc == 0 else '\n[exit %s]' % rc)
         ros_hosts = [h for h in self._resolve(pattern) if hs.get(h, {}).get('asm_kind') == 'routeros']
         ros_cmd = next((c for k, c in tasks if k == 'routeros'), None)
         if ros_hosts and ros_cmd:
@@ -1067,8 +1143,8 @@ class Server:
                 threads.append(t)
             for t in threads:
                 t.join()
-        tasks = [(k, c) for k, c in tasks if k == 'linux']
-        linux_left = [h for h in self._resolve(pattern) if hs.get(h, {}).get('asm_kind', 'linux') == 'linux']
+        tasks = [(k, c) for k, c in tasks if k in ANSIBLE_KINDS]
+        linux_left = [h for h in self._resolve(pattern) if hs.get(h, {}).get('asm_kind', 'linux') in ANSIBLE_KINDS]
         if linux_left and (read == 'guard' or tasks):
             per.update(self._look_ansible(pattern, read, tasks, a))
         self.audit.write('look', summary='%s %s' % (pattern, read or ('command: ' + command[:200])))
@@ -1105,9 +1181,9 @@ class Server:
         pb = os.path.join(d, 'look.yml')
         body = ['- hosts: %s' % json.dumps(pattern), '  gather_facts: false', '  tasks:']
         if read == 'guard':
-            body += ['    - mureev.confirmed.status:', '      when: asm_kind | default("linux") == "linux"']
+            body += ['    - mureev.confirmed.status:', '      when: asm_kind | default("linux") in ["linux", "macos"]']
         for kind, c in tasks:
-            mod = 'ansible.builtin.shell' if kind == 'linux' else 'ansible.builtin.raw'
+            mod = 'ansible.builtin.shell' if kind in ANSIBLE_KINDS else 'ansible.builtin.raw'
             body += ['    - name: %s' % kind, '      %s: %s' % (mod, unsafe_cmd(c)),
                      '      changed_when: false', '      failed_when: false',
                      '      when: asm_kind | default("linux") == "%s"' % kind]
@@ -1260,14 +1336,15 @@ class Server:
     def t_plan(self, a):
         path, rel, limit, params, targets = self._prepare(a)
         kind = self._kind_of(targets)
-        if kind in ('routeros', 'openwrt'):
+        if kind in ('routeros', 'openwrt', 'windows'):
             h = version_hash(self.cfg, rel, targets)
             approved = self.approvals.approved(h, rel, targets)
             self.audit.write('plan', summary='%s on %s' % (rel, ','.join(targets)), version=h[:12])
             return '%s on %s\nversion %s: %s\n\n%s' % (
                 rel, ', '.join(targets), h[:12],
                 'approved before, apply runs without asking' if approved else 'not approved yet, apply will ask',
-                (routeros_plan_text if kind == 'routeros' else openwrt_plan_text)(path, targets))
+                {'routeros': routeros_plan_text, 'openwrt': openwrt_plan_text,
+                 'windows': windows_plan_text}[kind](path, targets))
         plan = self._plan(path, limit, params)
         h = version_hash(self.cfg, rel, targets)
         approved = self.approvals.approved(h, rel, targets)
@@ -1293,11 +1370,18 @@ class Server:
         extra_paths = a.get('paths') or []
         extra_services = a.get('services') or []
         for p in extra_paths:
-            if not isinstance(p, str) or not p.startswith('/') or '\n' in p:
-                raise ToolError('paths: absolute paths on the hosts')
+            if not isinstance(p, str) or '\n' in p or not (p.startswith('/') or re.match(
+                    r'^([A-Za-z]:\\|(HKLM|HKCU|HKCR|HKU|HKCC):?\\)', p)):
+                raise ToolError('paths: absolute paths on the hosts (/etc/..., C:\\..., HKLM:\\...)')
         for s in extra_services:
             if not isinstance(s, str) or not re.match(r'^[A-Za-z0-9@._-]{1,120}$', s):
                 raise ToolError('services: unit names')
+        if kind == 'windows':
+            if not extra_paths:
+                raise ToolError('Windows changes need paths=[...]: the registry keys (HKLM:\\SOFTWARE\\...) and files '
+                                'or folders the commands change. Only those are snapshotted and restored on a revert.')
+            if any('{{' in c or '{%' in c for _, c in routeros_commands(path)):
+                raise ToolError('Windows playbooks run their raw commands as written (no templating): remove {{ }}')
         h = version_hash(self.cfg, rel, targets)
         job_id = time.strftime('%m%d%H%M') + secrets.token_hex(2)
         os.makedirs(os.path.join(self.cfg.jobs, job_id), mode=0o700)
@@ -1323,6 +1407,8 @@ class Server:
                 plan, plan_txt = None, routeros_plan_text(path, targets)
             elif kind == 'openwrt':
                 plan, plan_txt = None, openwrt_plan_text(path, targets)
+            elif kind == 'windows':
+                plan, plan_txt = None, windows_plan_text(path, targets)
             else:
                 plan = self._plan(path, limit, params)
                 unreachable = [x for x in targets if (plan.get(x) or {}).get('unreachable')]
@@ -1347,6 +1433,8 @@ class Server:
                 write_vars(vf, 'change', params)
                 if kind == 'openwrt':
                     self._run_openwrt(job_id, path, vf, targets, checks, window)
+                elif kind == 'windows':
+                    self._run_windows(job_id, path, targets, checks, window, extra_paths)
                 else:
                     self._run_routeros(job_id, path, vf, targets, checks, window)
                 return
@@ -1410,6 +1498,90 @@ class Server:
         if ok:
             self.approvals.add(h, rel, targets)
         return ok, True, how
+
+    def _run_windows(self, job_id, path, targets, checks, window, paths):
+        """Windows: a snapshot of the listed paths and a one-time SYSTEM scheduled task that restores it."""
+        jd = os.path.join(self.cfg.jobs, job_id)
+        progress = os.path.join(jd, 'progress.log')
+
+        def note(msg):
+            with open(progress, 'a') as f:
+                f.write('%s %s\n' % (time.strftime('%H:%M:%S'), msg))
+        cmds = routeros_commands(path)
+        regs = [p for p in paths if re.match(r'^(HKLM|HKCU|HKCR|HKU|HKCC):?\\', p)]
+        look_regs = '; '.join("& reg.exe query %s /s 2>$null" % windows.ps_quote(re.sub(r'^(\w+):', r'\1', p))
+                              for p in regs) or "''"
+        results = {}
+        hs = hosts_of(load_inventory(self.cfg))
+        kh = self.cfg.known_hosts
+        paths_b64 = windows.b64(json.dumps(paths))
+        for host in targets:
+            hv = hs[host]
+            lu, cu = hv['asm_look_user'], hv['asm_change_user']
+            lk, ck = hv.get('asm_look_key'), hv.get('asm_change_key')
+            r = results[host] = {'outcome': 'unknown', 'changed': 0}
+
+            def ex(script, user=cu, key=ck, timeout=180):
+                return windows.win_exec(hv, user, kh, script, key=key, timeout=timeout)
+            rc, before = ex(look_regs, lu, lk, 60)
+            rc, out = ex(windows.install_guard_script())
+            if rc != 0:
+                r.update(outcome='not-armed', detail='could not install the guard: %s' % out[-300:])
+                continue
+            rc, out = ex(windows.guard_call('arm', Id=job_id, Seconds=window, PathsB64=paths_b64))
+            data = routeros_kv(out)
+            if rc != 0 or data.get('state') != 'armed':
+                r.update(outcome='not-armed', detail='the guard did not arm, so nothing was changed: %s' % (
+                    data.get('error') or out.strip()[-300:]))
+                note('%s: %s' % (host, r['detail']))
+                continue
+            r['deadline'] = data.get('deadline_iso')
+            note('%s: guard armed (scheduled task until %s)' % (host, r['deadline']))
+            failed = None
+            for name, c in cmds:
+                crc, cout = ex("$ErrorActionPreference = 'Stop'\n" + c, timeout=max(30, min(window, 600)))
+                if crc != 0:
+                    failed = '%s: exit %s%s' % (name or c[:60], crc, (': ' + cout.strip()[-400:]) if cout.strip() else '')
+                    break
+                r['changed'] += 1
+            if failed:
+                rc, out = ex(windows.guard_call('revert', Why='failed'))
+                r.update(outcome='reverted-now' if routeros_kv(out).get('state') == 'reverted' else 'not-confirmed',
+                         failed_task=failed.split(':', 1)[0], detail=failed)
+            else:
+                rc, fresh = ex('whoami', lu, lk, 60)
+                r['checks'] = [{'check': 'ssh', 'ok': rc == 0, 'detail': 'fresh login as %s' % lu if rc == 0
+                                else fresh.strip()[-200:]}]
+                bad = rc != 0
+                for c in checks:
+                    if c in ('ssh', 'ping') or bad:
+                        continue
+                    crc, cout = ex("$ErrorActionPreference = 'Stop'\n" + c, timeout=120)
+                    r['checks'].append({'check': c, 'ok': crc == 0, 'detail': cout.strip()[-200:]})
+                    bad = bad or crc != 0
+                if bad:
+                    rc, out = ex(windows.guard_call('revert', Why='check-failed'))
+                    ok = routeros_kv(out).get('state') == 'reverted'
+                    r.update(outcome='reverted-now' if ok else 'not-confirmed',
+                             detail='a check failed after the change' + ('' if ok else '; the scheduled task reverts '
+                                                                                         'at the deadline'))
+                else:
+                    rc, out = ex(windows.guard_call('confirm', Id=job_id))
+                    if routeros_kv(out).get('state') == 'confirmed':
+                        r['outcome'] = 'confirmed'
+                    else:
+                        r.update(outcome='not-confirmed', detail='could not confirm: %s' % out.strip()[-200:])
+            note('%s: %s' % (host, r['outcome']))
+            if regs:
+                rc, after = ex(look_regs, lu, lk, 60)
+                import difflib as _d
+                diff = list(_d.unified_diff(before.splitlines(), after.splitlines(), 'before', 'after', lineterm='', n=0))
+                r['export_diff'] = '\n'.join(diff[:80]) if diff else '(no difference)'
+        job = self._load_job(job_id)
+        job.update(status='done', finished=time.time(), results=results)
+        self._save_job(job)
+        self.audit.write('job', summary='%s %s' % (job_id, ', '.join('%s=%s' % (h, r['outcome'])
+                                                                    for h, r in sorted(results.items()))))
 
     def _run_openwrt(self, job_id, path, vf, targets, checks, window):
         """OpenWrt: the guard is a snapshot + timer on the device (openwrt_guard.sh, sent at arm time)."""
@@ -1828,7 +2000,7 @@ class Server:
                 job = self._load_job(job_id)
             return self._job_text(job_id)
         if action in ('extend', 'revert'):
-            if job.get('kind') in ('routeros', 'openwrt'):
+            if job.get('kind') in ('routeros', 'openwrt', 'windows'):
                 raise ToolError('RouterOS changes are confirmed or undone within the apply itself (Safe Mode); there is '
                                 'no open window to extend or revert afterwards.')
             if action == 'extend':

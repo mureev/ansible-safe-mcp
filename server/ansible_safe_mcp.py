@@ -1423,7 +1423,11 @@ class Server:
                 if e.get('status') == 'changed' or (task['action'].endswith('raw') and e.get('status') == 'ok'):
                     r['changed'] += 1
                 if e.get('status') in ('failed', 'unreachable'):
-                    failed = '%s: %s' % (task['name'], str(e.get('msg') or e.get('stderr') or '').strip()[:400])
+                    out = ((e.get('stdout') or '') + (e.get('stderr') or '')).strip()
+                    out = re.sub(r'Shared connection to \S+ closed\.?', '', out).strip()
+                    rc = e.get('rc')
+                    failed = '%s: %s' % (task['name'], ('exit %s%s' % (rc, (': ' + out[:400]) if out else ''))
+                                         if rc not in (None, 0) else str(e.get('msg') or out).strip()[:400])
                     break
             if doc is None and not failed:
                 failed = 'ansible did not finish: %s' % err[-400:]

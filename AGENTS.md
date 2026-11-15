@@ -36,6 +36,7 @@ change.
 | Linux | `systemd-run` timer, plus a boot check for pending deadlines | files the plan touches, firewall ruleset, unit states | restore, reload, restart units |
 | Windows | one-time scheduled task as SYSTEM (`\\ansible-safe\\asm-guard-revert`), runs late if the PC was off | the registry keys and files you list (`paths=`) | restore |
 | macOS | LaunchDaemon that rereads its deadline at boot (the server sends the guard over SSH: no Python needed) | the paths you list | restore, restart services |
+| Synology DSM | a detached timer process (DSM has no `systemd-run`; a reboot inside the window loses it) | the paths you list | restore |
 | MikroTik RouterOS | Safe Mode, held by the server for the change (the router undoes it if the session ends abnormally) | the router's own Safe Mode history | Ctrl+D; or the router itself when the session drops |
 | OpenWrt | a timer process on the device, in RAM (no Python needed) | `/etc/config`, dropbear, crontabs, firewall and passwd files, in `/tmp` | restore, `reload_config` |
 
@@ -199,6 +200,8 @@ the collection.
 | OpenWrt router | a change confirmed with a uci diff; a typo undone at once |
 | Windows 11 Home (Russian locale) | a registry change confirmed; a typo undone at once; an orphaned arm reverted by the SYSTEM task at its deadline |
 | macOS 26 on a 2019 MacBook Pro, no Python, behind a jump host | a file change confirmed; a typo undone at once, file back as it was |
+| Synology DS216j, DSM 7.4 | a file change confirmed; a typo undone at once |
+| Windows 11 PC behind a jump host (reverse tunnel) | a job cut off by a network switch: the SYSTEM task restored the PC at its deadline |
 
 ## Roadmap
 

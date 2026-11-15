@@ -2,6 +2,12 @@
 
 ## 0.3.1 (unreleased)
 
+- **Checks**: `look check=<name>` runs a read-only script of your own from `checks/<kind>/` (Linux, macOS and Synology
+  as root through sudo; OpenWrt, RouterOS in blocks, Windows), with a per-kind `_lib` prepended. Each script version
+  is approved once, like a playbook version. `playbook` writes and lists them; `status` counts their approvals.
+- **Masked output**: everything `look` returns goes through a port of infra-bridge's masking (keys, tokens,
+  passwords, uci secrets, WireGuard keys, UUIDs and opaque tokens as stable pseudonyms, RouterOS script bodies,
+  serials; `ASM_MASK_DOMAINS` for your own URL paths), linear-time on hostile input (`tests/test_redact.py`).
 - **Docker and journal reads as the look account**: adding a Linux host installs `/etc/sudoers.d/ansible-safe-look`
   (checked with `visudo`), so the look account may run `docker ps/logs/inspect/images/stats` and
   `journalctl --no-pager` through sudo and nothing else; it stays out of the docker group. `hosts action=setup`

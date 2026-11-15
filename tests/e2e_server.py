@@ -279,6 +279,37 @@ mac_part = t.split('== macbox', 1)[-1].split('\n== ', 1)[0]
 check('look across kinds: macOS read over plain SSH, not through Ansible', '== macbox' in t and 'state=' in mac_part
       and 'UNREACHABLE' not in mac_part and 'mureev.confirmed' not in mac_part, t)
 
+# ---- checks: scripts in checks/<kind>/, run as root, approved once per version, output masked
+t, e = tool('playbook', action='write', path='checks/linux/whoami.sh',
+            content='echo "uid=$(id -u)"\necho "password=hunter2secret token: abcdef12"\n'
+                    'echo "client 3f2a1b4c-1111-2222-3333-444455556666"\necho "Serial Number: C02XYZ987654"\n')
+check('checks: a script is written to checks/linux/', not e and 'Wrote checks/linux/whoami.sh' in t, t)
+t, e = tool('playbook', action='write', path='checks/linux/bad name.sh', content='true\n')
+check('checks: a bad check path is refused', e, t)
+n0 = asked()
+t, e = tool('look', hosts='box', check='whoami')
+check('checks: first run asks once and runs as root', not e and asked() == n0 + 1 and 'uid=0' in t, t)
+check('checks: output is masked (password, token, UUID, serial)', 'hunter2' not in t and 'abcdef12' not in t
+      and '3f2a1b4c' not in t and '[UUID:' in t and 'C02XYZ987654' not in t and '****7654' in t, t)
+t, e = tool('look', hosts='box', check='whoami')
+check('checks: the same version runs again without asking', not e and asked() == n0 + 1 and 'uid=0' in t, t)
+tool('playbook', action='write', path='checks/linux/whoami.sh', content='echo "uid=$(id -u) edited"\n')
+t, e = tool('look', hosts='box', check='whoami')
+check('checks: an edited script asks again', asked() == n0 + 2 and 'edited' in t, t)
+open(os.path.join(W, 'DENY'), 'w').close()
+tool('playbook', action='write', path='checks/linux/whoami.sh', content='echo "uid=$(id -u) declined"\n')
+t, e = tool('look', hosts='box', check='whoami')
+os.remove(os.path.join(W, 'DENY'))
+check('checks: a declined version does not run', 'declined check' in t and 'uid=0 declined' not in t, t)
+t, e = tool('look', hosts='box', check='nosuch')
+check('checks: a missing check lists the ones there are', 'whoami' in t and 'no check' in t, t)
+t, e = tool('look', hosts='box', check='whoami', read='overview')
+check('checks: check and read together are refused', e, t)
+t, e = tool('status')
+check('checks: status counts check approvals', 'approved check versions: 2' in t, t)
+t, e = tool('look', hosts='box', command='echo "secret=topsecretvalue"')
+check('look command output is masked too', 'topsecretvalue' not in t and 'secret=[REDACTED]' in t, t)
+
 # ---- RouterOS, against the fake console (rlook/rchange on the same sshd; see tests/fakeros)
 if os.path.exists('/usr/local/bin/fakeros'):
     shutil.rmtree('/tmp/fakeros', ignore_errors=True)
@@ -292,6 +323,12 @@ if os.path.exists('/usr/local/bin/fakeros'):
     check('routeros: add host, both accounts', not e and 'change account: logs in' in t, t)
     t, e = tool('look', hosts='rtr', command='/system identity print')
     check('routeros: look', 'name: fake' in t, t)
+    tool('playbook', action='write', path='checks/routeros/ident.rsc',
+         content='## identity [raw]\n/system identity print\n## config [raw]\n/export terse\n## users\n/user print\n')
+    t, e = tool('look', hosts='rtr', check='ident')
+    check('checks: routeros blocks, a missing menu fails only its block, serial masked',
+          '### identity\n  name: fake' in t and '192.168.88.1/24' in t and 'not available on this router' in t
+          and 'FAKE' not in t, t)
     t, e = tool('backup', hosts='rtr')
     m = re.search(r'saved (\S+export\.rsc)', t)
     check('backup: routeros /export terse saved', not e and m and '192.168.88.1/24' in open(m.group(1)).read(), t)
@@ -342,6 +379,12 @@ if os.path.exists('/usr/local/bin/owrt-shell'):
     check('openwrt: add a one-account host, both checks', not e and 'can write /etc/config' in t, t)
     t, e = tool('look', hosts='owrt', command='uci show')
     check('openwrt: look', "network: config interface 'lan'" in t, t)
+    tool('playbook', action='write', path='checks/openwrt/_lib.sh', content='LIBVAR=from-lib\n')
+    tool('playbook', action='write', path='checks/openwrt/net.sh',
+         content='echo "lib=$LIBVAR"; echo "wireless.radio0.key=\'wifipass1\'"; id -un\n')
+    t, e = tool('look', hosts='owrt', check='net')
+    check('checks: openwrt runs sh with _lib prepended, uci secrets hidden',
+          'lib=from-lib' in t and 'wifipass1' not in t and 'owrt' in t, t)
     t, e = tool('backup', hosts='owrt')
     m1 = re.search(r'saved (\S+sysupgrade\.tar\.gz)', t)
     m2 = re.search(r'saved (\S+uci-export\.txt) \(\d+ bytes, \d+ lines', t)

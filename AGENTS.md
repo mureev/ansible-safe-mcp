@@ -76,7 +76,7 @@ change.
 | Tool | Does | Asks you? |
 |---|---|---|
 | `hosts` | List, add, test and remove hosts. Adding connects once, shows you the host key's fingerprint, pins it, and checks both accounts (look, change); `rename` renames. On Linux it also gives the look account `docker ps/logs/inspect` and `journalctl` through sudo, nothing else; `setup` does that for a host added earlier; `create_look` makes the look account on a Linux host that has none. | adding a host, `setup` |
-| `look` | Read state: shipped reads (services, containers, logs, disk, updates, router status, interfaces) or a one-off read command, run as the unprivileged look account. | no |
+| `look` | Read state: shipped reads (services, containers, logs, disk, updates, router status, interfaces) or a one-off read command, run as the unprivileged look account; or `check=<name>`, a script of your own from `checks/<kind>/` (see [Checks](#checks)). Output is masked. | a check: once per script version |
 | `backup` | Pull a copy of config into the server's state folder (not the project repo): RouterOS `/export terse`, OpenWrt `sysupgrade -b` and `uci export`, the paths you list on Linux, macOS and Windows (registry keys as `.reg`). Files are 0600; the tool returns path, size and sha256, never the contents. | no |
 | `playbook` | Create, edit and list playbooks in the project folder (a git repo). Lint runs on every save. | no |
 | `plan` | `--check --diff` for a playbook and a host list: what would change, per host. | no |
@@ -84,6 +84,25 @@ change.
 | `hands` | A one-off change ("remote hands"): Claude's steps become a generated playbook under the same guard, saved to `oneoffs/`. | **yes, each time** |
 | `job` | Follow a running change; extend its window; revert it now. | no |
 | `status` | Pending windows, recent reverts, what the lint guard refused, and the audit log. | no |
+
+## Checks
+
+A check is a read-only script you keep in the project, for the reads the look account can't do: firewall rules, a
+panel's settings, the full Docker picture. `checks/<kind>/<name>.sh` (linux, macos, synology, openwrt), `.rsc`
+(routeros) or `.ps1` (windows); `checks/<kind>/_lib.<ext>` is prepended to every check of that kind. Write them with
+`playbook action=write path=checks/linux/firewall.sh`, run them with `look hosts=web check=firewall`.
+
+- They run as **root** on Linux, macOS and Synology (`sudo -n bash`, script on stdin), as the device's account on
+  OpenWrt, as the read-only account on RouterOS and as the administrator on Windows. So each **script version** is
+  approved once, like a playbook version; editing it asks again. Keep them to reading.
+- RouterOS checks are blocks, one SSH exec each: `## title` starts a block (each command runs under `:do ...
+  on-error`, so a missing menu fails only its block), `## title [raw]` sends one command as it is (an export must be
+  one), `## title [tail=N]` keeps the last N lines, `#> label` names the next command.
+- **All `look` output is masked** before it reaches the chat: private keys, bearer tokens, URL passwords, secret
+  `key=value` pairs, uci secret options, WireGuard keys and opaque tokens (stable pseudonyms, so two values stay
+  apart), UUIDs, RouterOS script bodies (length + hash), hardware serials (last 4 characters). Set
+  `ASM_MASK_DOMAINS=example.org` to hide URL paths on your own domains too. It is a backstop: a check should not print
+  secrets in the first place.
 
 ## Safety model
 
@@ -181,7 +200,8 @@ JSON on stdin and approves by exiting 0).
 - `collections/ansible_collections/mureev/confirmed/tests/e2e/`: the collection against a real SSH host: a confirmed
   change stays; a failed check reverts at once; a second arm is refused; and a `DenyUsers` change that locks Ansible
   out is put back by the host at the deadline.
-- `tests/e2e_server.py`: the MCP server over stdio, 81 checks: adding a host, reads as the look account (not
+- `tests/test_redact.py`: the output masking, including hostile input that must stay fast.
+- `tests/e2e_server.py`: the MCP server over stdio, 94 checks: adding a host, reads as the look account (not
   templated, no sudo), every lint refusal, plan, approve once, rerun without asking, edited playbook asks again,
   decline, a half-failed change reverted at once, the lockout, a tampered inventory, the audit log's hash chain, and
   macOS's server-driven guard, RouterOS under Safe Mode against a stand-in console (confirm; a lockout undone through the held session; a bad

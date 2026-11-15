@@ -168,7 +168,7 @@ The timers are a normal Ansible collection, [`mureev.confirmed` on Galaxy](https
 
 ## Install
 
-**Requirements:** macOS with the Claude desktop app; Python 3.10+ (the installer gets one with `uv` if needed);
+**Requirements:** macOS with the Claude desktop app (chat or Cowork) or OpenAI Codex (CLI or app); Python 3.10+ (the installer gets one with `uv` if needed);
 SSH access to each host with two accounts: one that can only read (no sudo, not in the `docker` group) and one with
 passwordless sudo, both accepting a key from your ssh-agent.
 
@@ -190,9 +190,12 @@ bash ~/ansible-safe-mcp/install.sh
 
 It makes a venv with `ansible-core` at `~/.config/claude-mcp/ansible-safe-mcp/venv`, installs a read-only copy of the
 server and the collection next to it, checks the copy answers the MCP handshake, backs up
-`claude_desktop_config.json` and adds only the `ansible-safe` entry. `--check` shows what is installed and changes
+`claude_desktop_config.json` and adds only the `ansible-safe` entry. **Codex:** when `~/.codex` exists (or with
+`ASM_CODEX=1`), it also writes `[mcp_servers.ansible-safe]` into `~/.codex/config.toml` (backed up first; nothing
+else in it changes), with `tool_timeout_sec = 120`; restart Codex to load it. Codex reads this file (`AGENTS.md`)
+too. The approval dialog is the server's own, so it works the same from either client. `--check` shows what is installed and changes
 nothing; `--remove` takes the entry and the copy out. Your playbooks live in `~/ansible-safe` (a git repo: every file
-Claude writes is a commit); state, approvals and the audit log in `~/.local/state/ansible-safe-mcp`.
+the agent writes is a commit), or in `ASM_PROJECT`; state, approvals and the audit log in `~/.local/state/ansible-safe-mcp`.
 
 **Local Network:** macOS asks before a new program may reach devices on your LAN. Allow "Python" when it asks
 (or in System Settings → Privacy & Security → Local Network); until then LAN hosts fail with "No route to host".
@@ -210,6 +213,9 @@ JSON on stdin and approves by exiting 0).
   change stays; a failed check reverts at once; a second arm is refused; and a `DenyUsers` change that locks Ansible
   out is put back by the host at the deadline.
 - `tests/test_redact.py`: the output masking, including hostile input that must stay fast.
+- `tests/test_tool_contract.py`: every tool and argument described, titles, protocol negotiation.
+- `tests/test_install_codex.sh`: the Codex entry in `~/.codex/config.toml` is written and removed without touching
+  anything else.
 - `tests/e2e_server.py`: the MCP server over stdio, 99 checks: adding a host, reads as the look account (not
   templated, no sudo), every lint refusal, plan, approve once, rerun without asking, edited playbook asks again,
   decline, a half-failed change reverted at once, the lockout, a tampered inventory, the audit log's hash chain, and

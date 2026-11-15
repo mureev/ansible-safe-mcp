@@ -40,7 +40,7 @@ playbook touches those.
 
 You run a few servers, routers or PCs over SSH and want Claude to do the chores: patch, fix, look into why the disk
 filled up. It works on **Linux, Windows, macOS, MikroTik RouterOS and OpenWrt**, directly or through a jump host,
-from the Claude desktop app on a Mac. If you have Ansible Automation Platform, Red Hat's own MCP server fits better
+from the Claude desktop app (chat or Cowork) or OpenAI Codex on a Mac. If you have Ansible Automation Platform, Red Hat's own MCP server fits better
 ([the other options](AGENTS.md#why-not-the-standard-options)).
 
 The timers also work without Claude: [`mureev.confirmed`](https://galaxy.ansible.com/ui/repo/published/mureev/confirmed/)

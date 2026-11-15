@@ -103,6 +103,53 @@ if lost:
 print(f"  \033[32m✓\033[0m {name} entry {what}; servers now: {', '.join(after)}")
 PY
 }
+# OpenAI Codex (CLI and app) reads MCP servers from ~/.codex/config.toml. Added when Codex is there (or ASM_CODEX=1);
+# only our own [mcp_servers.ansible-safe] tables are touched, and the file is replaced only after it parses back.
+CODEX_CFG="${CODEX_HOME:-$HOME/.codex}/config.toml"
+codex_wanted() { [ "${ASM_CODEX:-}" = 1 ] || [ -d "${CODEX_HOME:-$HOME/.codex}" ] || command -v codex >/dev/null 2>&1; }
+edit_codex() {  # edit_codex set|remove
+  [ "$1" = remove ] && [ ! -f "$CODEX_CFG" ] && return 0
+  mkdir -p "$(dirname "$CODEX_CFG")"
+  CODEX_CFG="$CODEX_CFG" ACTION="$1" APP="$APP" VENV="$VENV" PROJECT="$PROJECT" "$VENV/bin/python" -I - <<'PY'
+import os, re, tomllib
+p, act = os.environ["CODEX_CFG"], os.environ["ACTION"]
+old = open(p).read() if os.path.exists(p) else ""
+before = tomllib.loads(old)
+# drop our tables: [mcp_servers.ansible-safe] and [mcp_servers.ansible-safe.<sub>], up to the next other header
+out, skip = [], False
+for line in old.splitlines(keepends=True):
+    h = re.match(r'^\s*\[+\s*([^\]]+?)\s*\]+\s*(#.*)?$', line)
+    if h:
+        name = h.group(1).replace('"', '')
+        skip = name == "mcp_servers.ansible-safe" or name.startswith("mcp_servers.ansible-safe.")
+    if not skip and line.strip() != "# ansible-safe-mcp (written by its install.sh)":
+        out.append(line)
+text = "".join(out).rstrip() + "\n"
+if act == "set":
+    def q(v):
+        return '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    env = {"ASM_PROJECT": os.environ["PROJECT"], "ASM_COLLECTIONS": os.environ["APP"] + "/collections",
+           "ASM_ANSIBLE_BIN": os.environ["VENV"] + "/bin"}
+    if os.environ.get("ASM_MASK_DOMAINS"):
+        env["ASM_MASK_DOMAINS"] = os.environ["ASM_MASK_DOMAINS"]
+    text += ("\n# ansible-safe-mcp (written by its install.sh)\n[mcp_servers.ansible-safe]\n"
+             "command = %s\nargs = [\"-I\", \"-B\", %s]\n"
+             "startup_timeout_sec = 30\ntool_timeout_sec = 120\n\n[mcp_servers.ansible-safe.env]\n"
+             % (q(os.environ["VENV"] + "/bin/python"), q(os.environ["APP"] + "/server/ansible_safe_mcp.py"))
+             + "".join("%s = %s\n" % (k, q(v)) for k, v in env.items()))
+after = tomllib.loads(text)
+lost = set(before) - set(after)
+lost |= set(before.get("mcp_servers", {})) - set(after.get("mcp_servers", {})) - {"ansible-safe"}
+if lost:
+    raise SystemExit("  Codex config: would lose %s; not written" % sorted(lost))
+tmp = p + ".asm-tmp"
+with open(tmp, "w") as f:
+    f.write(text)
+os.chmod(tmp, 0o600)
+os.replace(tmp, p)
+print("  \033[32m✓\033[0m Codex: ansible-safe entry %s in %s" % ("written" if act == "set" else "removed", p))
+PY
+}
 backup_cfg() {
   mkdir -p "$HOME/.config/claude-mcp/backups"; chmod 700 "$HOME/.config/claude-mcp/backups"
   if [ -f "$CFG" ]; then
@@ -121,6 +168,7 @@ if [ "$MODE" = check ]; then
          >/dev/null 2>&1; then ok "installed copy matches this folder"; else warn "installed copy differs from this folder"; fi
   else warn "not installed ($APP missing)"; fi
   /usr/bin/python3 -I -c 'import json,sys; s=json.load(open(sys.argv[1])).get("mcpServers",{}); print("  \033[32m✓\033[0m Claude entry present" if "ansible-safe" in s else "  \033[33m!\033[0m no Claude entry")' "$CFG" 2>/dev/null || warn "no Claude config"
+  grep -q '^\[mcp_servers.ansible-safe\]' "$CODEX_CFG" 2>/dev/null && ok "Codex entry present ($CODEX_CFG)" || ok "no Codex entry"
   ok "project folder: $PROJECT"
   exit 0
 fi
@@ -129,6 +177,7 @@ if [ "$MODE" = remove ]; then
   quit_claude
   backup_cfg
   edit_cfg remove
+  [ -x "$VENV/bin/python" ] && edit_codex remove
   [ -d "$APP" ] && { chmod -R u+w "$APP"; rm -rf "$APP"; ok "removed $APP"; }
   ok "kept: the venv ($VENV), your project ($PROJECT) and the state and audit log (~/.local/state/ansible-safe-mcp)"
   exit 0
@@ -182,6 +231,10 @@ case "$reply" in *'"ansible-safe-mcp"'*) ok "the server answers the MCP handshak
 quit_claude
 backup_cfg
 edit_cfg set
+if codex_wanted; then
+  [ -f "$CODEX_CFG" ] && { cp -p "$CODEX_CFG" "$HOME/.config/claude-mcp/backups/codex-config.$(date +%Y%m%d-%H%M%S).toml"; }
+  edit_codex set || warn "Codex config not changed (see above)"
+fi
 cat <<EOF
 
 $(say "Next:")

@@ -35,7 +35,7 @@ import redact  # noqa: E402
 import routeros  # noqa: E402
 import windows  # noqa: E402
 
-VERSION = '0.3.0'
+VERSION = '0.3.1'
 PROTOCOLS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05']
 NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$')
 ADDR_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9.:_-]{0,252}$')

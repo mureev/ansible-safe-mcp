@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.1 (unreleased)
+## 0.3.1 — 2026-11-15
 
 - **Checks**: `look check=<name>` runs a read-only script of your own from `checks/<kind>/` (Linux, macOS and Synology
   as root through sudo; OpenWrt, RouterOS in blocks, Windows), with a per-kind `_lib` prepended. Each script version

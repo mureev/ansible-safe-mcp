@@ -4,7 +4,7 @@ Ctrl+D undoes, /quit keeps, an abnormal end undoes."""
 import os, signal, sys, time, tty
 D = '/tmp/fakeros'; CFG = D + '/config'; SNAP = D + '/snap'
 os.makedirs(D, exist_ok=True); os.umask(0)
-if not os.path.exists(CFG): open(CFG, 'w').write('/ip address add address=192.168.88.1/24 interface=bridge\n')
+if not os.path.exists(CFG): open(CFG, 'w').write('/ip address add address=192.0.2.1/24 interface=bridge\n')
 if os.path.exists(D + '/locked'):
     sys.stderr.write('Permission denied (locked out)\n'); sys.exit(255)
 cmd = os.environ.get('SSH_ORIGINAL_COMMAND')

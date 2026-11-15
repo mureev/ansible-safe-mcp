@@ -316,7 +316,7 @@ if os.path.exists('/usr/local/bin/fakeros'):
     os.makedirs('/tmp/fakeros', mode=0o777)
     os.chmod('/tmp/fakeros', 0o777)
     with open('/tmp/fakeros/config', 'w') as f:
-        f.write('/ip address add address=192.168.88.1/24 interface=bridge\n')
+        f.write('/ip address add address=192.0.2.1/24 interface=bridge\n')
     os.chmod('/tmp/fakeros/config', 0o666)
     t, e = tool('hosts', action='add', name='rtr', address='127.0.0.1', port=2222, kind='routeros', look_user='rlook',
                 change_user='rchange', key_file=os.environ.get('ASM_TEST_KEY', '/root/.ssh/asm_test'))
@@ -327,16 +327,16 @@ if os.path.exists('/usr/local/bin/fakeros'):
          content='## identity [raw]\n/system identity print\n## config [raw]\n/export terse\n## users\n/user print\n')
     t, e = tool('look', hosts='rtr', check='ident')
     check('checks: routeros blocks, a missing menu fails only its block, serial masked',
-          '### identity\n  name: fake' in t and '192.168.88.1/24' in t and 'not available on this router' in t
+          '### identity\n  name: fake' in t and '192.0.2.1/24' in t and 'not available on this router' in t
           and 'FAKE' not in t, t)
     t, e = tool('backup', hosts='rtr')
     m = re.search(r'saved (\S+export\.rsc)', t)
-    check('backup: routeros /export terse saved', not e and m and '192.168.88.1/24' in open(m.group(1)).read(), t)
+    check('backup: routeros /export terse saved', not e and m and '192.0.2.1/24' in open(m.group(1)).read(), t)
     good = """- hosts: rtr
   gather_facts: false
   tasks:
     - name: add a route
-      ansible.builtin.raw: /add /ip route add dst-address=10.9.0.0/16 gateway=192.168.88.2
+      ansible.builtin.raw: /add /ip route add dst-address=10.9.0.0/16 gateway=192.0.2.2
 """
     tool('playbook', action='write', path='playbooks/rtr-route.yml', content=good)
     t, e = tool('plan', playbook='playbooks/rtr-route.yml')

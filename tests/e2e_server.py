@@ -402,11 +402,35 @@ open('/etc/synoinfo.conf', 'w').write('unique="synology_test"\n')
 try:
     t, e = tool('hosts', action='add', name='box3', address='127.0.0.1', port=2222, look_user='change',
                 change_user='change', key_file=os.environ.get('ASM_TEST_KEY', '/root/.ssh/asm_test'))
-    check('one account for both: allowed on Synology, with a note in the dialog', not e and 'Added box3' in t
-          and 'look allowlist' not in t and 'Synology' in open(LOG).read().splitlines()[-1], t)
+    check('linux on a Synology: told to use kind=synology', e and 'kind="synology"' in t, t)
+    t, e = tool('hosts', action='add', name='nas', address='127.0.0.1', port=2222, kind='synology', look_user='change',
+                change_user='change', key_file=os.environ.get('ASM_TEST_KEY', '/root/.ssh/asm_test'))
+    check('synology: one account for both, with a note in the dialog', not e and 'Added nas' in t
+          and 'Synology' in open(LOG).read().splitlines()[-1] and 'change account: logs in and can sudo' in t, t)
+    t, e = tool('look', hosts='nas', read='overview')
+    check('synology: reads over plain SSH', not e and 'UNREACHABLE' not in t and 'Filesystem' in t, t)
+    nas_ok = """- hosts: nas
+  gather_facts: false
+  tasks:
+    - name: write a file
+      ansible.builtin.raw: echo nas > /etc/asm-nas
+"""
+    tool('playbook', action='write', path='playbooks/nas-ok.yml', content=nas_ok)
+    t, e = tool('apply', playbook='playbooks/nas-ok.yml', window='60s', paths=['/etc/asm-nas'])
+    check('synology: change confirmed under the guard', 'CONFIRMED' in t and open('/etc/asm-nas').read() == 'nas\n', t)
+    nas_bad = """- hosts: nas
+  gather_facts: false
+  tasks:
+    - ansible.builtin.raw: echo changed > /etc/asm-nas
+    - ansible.builtin.raw: exit 3
+"""
+    tool('playbook', action='write', path='playbooks/nas-bad.yml', content=nas_bad)
+    t, e = tool('apply', playbook='playbooks/nas-bad.yml', window='60s', paths=['/etc/asm-nas'])
+    check('synology: a failing command restores the file', 'REVERTED' in t and open('/etc/asm-nas').read() == 'nas\n', t)
 finally:
     os.remove('/etc/synoinfo.conf')
     tool('hosts', action='remove', name='box3')
+    tool('hosts', action='remove', name='nas')
 
 lines = open(W + '/state/audit.jsonl').read().splitlines()
 ok = True

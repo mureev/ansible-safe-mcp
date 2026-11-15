@@ -144,8 +144,9 @@ passwordless sudo, both accepting a key from your ssh-agent.
 **Per kind of host:** Linux needs Python for Ansible's modules; `create_look=true` makes the look account for you. macOS needs nothing extra: reads, the guard and the
 change all go over plain SSH, so playbooks there are `raw` shell commands (run with sudo), and changes take
 `paths=[...]`. Windows needs the OpenSSH server and an administrator change account; playbooks there are
-`raw` PowerShell commands, and changes take `paths=[...]` (registry keys as `HKLM:\...`, or files). Synology DSM lets only
-administrators log in over SSH, so one account does both there. RouterOS needs a
+`raw` PowerShell commands, and changes take `paths=[...]` (registry keys as `HKLM:\...`, or files). Synology NAS: `kind="synology"`
+(DSM's Python is too old for Ansible, so it works like macOS: raw commands over SSH, `paths=[...]`; DSM lets only
+administrators log in over SSH, so one account does both). RouterOS needs a
 read-only group for the look account; OpenWrt can use root for both. Hosts behind a bastion: add the bastion with
 `kind="jump"` first.
 
@@ -177,7 +178,7 @@ JSON on stdin and approves by exiting 0).
 - `collections/ansible_collections/mureev/confirmed/tests/e2e/`: the collection against a real SSH host: a confirmed
   change stays; a failed check reverts at once; a second arm is refused; and a `DenyUsers` change that locks Ansible
   out is put back by the host at the deadline.
-- `tests/e2e_server.py`: the MCP server over stdio, 69 checks: adding a host, reads as the look account (not
+- `tests/e2e_server.py`: the MCP server over stdio, 73 checks: adding a host, reads as the look account (not
   templated, no sudo), every lint refusal, plan, approve once, rerun without asking, edited playbook asks again,
   decline, a half-failed change reverted at once, the lockout, a tampered inventory, the audit log's hash chain, and
   macOS's server-driven guard, RouterOS under Safe Mode against a stand-in console (confirm; a lockout undone through the held session; a bad

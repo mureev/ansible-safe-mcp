@@ -8,8 +8,10 @@
   installs it on a host added earlier.
 - **`create_look`**: adding a Linux host can create the look account through the change account (no password,
   no sudo, no groups, the change account's keys).
-- **Synology DSM**: DSM lets only administrators log in over SSH, so a DSM host may use one account for reads and
-  changes (detected from `/etc/synoinfo.conf`; the add dialog says so). Plain Linux still needs two.
+- **Synology DSM hosts** (`kind="synology"`): DSM's Python (3.8) is too old for Ansible, so the server reads and
+  changes them over plain SSH like macOS (raw commands with sudo, `paths=[...]`, the guard on a systemd timer), and,
+  since DSM lets only administrators log in over SSH, one account may do both. Adding a DSM host as `linux` says so.
+- `hands` writes raw commands when every target is changed over plain SSH (macOS, Synology, Windows, routers).
 - `look` across kinds sends only Linux hosts through Ansible; macOS, Windows, RouterOS and OpenWrt are read over
   plain SSH even in a mixed pattern (a guard read over `all` showed a Mac behind a jump host as unreachable).
 - **`backup`**: pull a copy of hosts' configuration into `~/.local/state/ansible-safe-mcp/backups/<host>/<time>/`

@@ -41,9 +41,11 @@ ADDR_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9.:_-]{0,252}$')
 USER_RE = re.compile(r'^[a-z_][a-z0-9_.-]{0,31}(\+[a-z0-9]{1,16})?$')
 PATTERN_RE = re.compile(r'^[A-Za-z0-9_.*:,!&\[\]-]{1,400}$')
 SAFE_STR = r'^[A-Za-z0-9 ._@:/+,=-]{0,200}$'
-KINDS = ('linux', 'macos', 'routeros', 'openwrt', 'windows', 'jump')
+KINDS = ('linux', 'macos', 'synology', 'routeros', 'openwrt', 'windows', 'jump')
 ANSIBLE_KINDS = ('linux', 'macos')  # sudo-capable POSIX hosts
-SERVER_GUARDED = ('routeros', 'openwrt', 'windows', 'macos')  # no Python needed: the server drives the guard
+SERVER_GUARDED = ('routeros', 'openwrt', 'windows', 'macos', 'synology')  # no Python needed: the server drives the guard
+POSIX_SSH = ('macos', 'synology')  # sudo hosts changed with raw commands over SSH (macOS: often no Python; DSM: too old)
+GUARD_DIR = {'macos': '/var/db/ansible-confirmed', 'synology': '/var/lib/ansible-confirmed'}
 
 
 def collection_guard_sh(cfg):
@@ -767,10 +769,10 @@ def routeros_kv(text):
     return out
 
 
-def macos_plan_text(path, targets):
+def macos_plan_text(path, targets, timer='a launchd daemon'):
     cmds = routeros_commands(path)
-    lines = ['%s: under the guard (snapshot of the paths you list + a launchd daemon that restores them at the '
-             'deadline, also after a reboot), %d command%s run with sudo:' % (', '.join(targets), len(cmds),
+    lines = ['%s: under the guard (snapshot of the paths you list + %s that restores them at the '
+             'deadline, also after a reboot), %d command%s run with sudo:' % (', '.join(targets), timer, len(cmds),
                                                                           '' if len(cmds) == 1 else 's')]
     for name, c in cmds[:60]:
         lines.append('  > %s%s' % (c[:300], ('    # ' + name) if name else ''))
@@ -900,6 +902,18 @@ READS = {
         'updates': '(opkg list-upgradable 2>/dev/null || apk list --upgradable 2>/dev/null) | head -50',
         'logs': 'logread | tail -n 200',
         'guard': 'sh "$R"/tmp/asm-guard/guard.sh status 2>/dev/null || echo "asm-guard: not armed"',
+    },
+    'synology': {
+        'overview': 'hostname; cat /etc.defaults/VERSION 2>/dev/null | grep -E "productversion|buildnumber"; uptime; '
+                    'echo; df -h 2>/dev/null | grep -E "^Filesystem|/volume|/$"; echo; free -h 2>/dev/null',
+        'services': 'systemctl list-units --type=service --state=running --no-legend --no-pager 2>/dev/null | head -100',
+        'containers': 'sudo -n docker ps -a 2>&1 | head -50',
+        'disk': 'df -h 2>/dev/null; echo; cat /proc/mdstat 2>/dev/null',
+        'updates': 'cat /etc.defaults/VERSION 2>/dev/null; echo "(DSM updates: Control Panel > Update & Restore)"',
+        'interfaces': 'ip -br addr 2>/dev/null || ifconfig; echo; ip route 2>/dev/null | head -15',
+        'logs': '{ sudo -n journalctl --no-pager -n 200 -p warning 2>/dev/null || tail -n 200 /var/log/messages; }',
+        'guard': 'D=/var/lib/ansible-confirmed; if [ -e $D/armed ]; then echo "state=armed"; else echo state=idle; fi; '
+                 '[ -e $D/last ] && echo "last=$(sudo -n cat $D/last 2>/dev/null || cat $D/last 2>/dev/null)"; true',
     },
     'macos': {
         'overview': 'scutil --get ComputerName; sw_vers; uptime; echo; df -h / | tail -1; echo; '
@@ -1032,7 +1046,7 @@ class Server:
         if not (USER_RE.match(look_u) and USER_RE.match(change_u)):
             raise ToolError('look_user and change_user: account names on the host')
         shared_ok = kind == 'linux' and look_u == change_u and look_u != 'root' and not a.get('create_look')
-        if kind not in ('openwrt', 'windows', 'macos', 'jump') and (look_u == change_u or look_u == 'root') \
+        if kind not in ('openwrt', 'windows', 'macos', 'synology', 'jump') and (look_u == change_u or look_u == 'root') \
                 and not shared_ok:
             raise ToolError('look_user and change_user are two different accounts on the host: one that can only '
                             'read, one that can change things (sudo); the look account must not be root')
@@ -1091,12 +1105,17 @@ class Server:
             shutil.rmtree(d, ignore_errors=True)
             raise ToolError('create_look needs a change account that can sudo without a password; %s cannot' % change_u)
         warn = ''
+        if kind == 'linux' and 'SYNOLOGY' in p.stdout:
+            shutil.rmtree(d, ignore_errors=True)
+            raise ToolError('this is a Synology NAS: add it with kind="synology" (DSM\'s Python is too old for '
+                            'Ansible, so the server changes it over plain SSH, and DSM lets only administrators log in '
+                            'over SSH, so look_user may be the same as change_user)')
         if shared_ok:
-            if 'SYNOLOGY' not in p.stdout:
-                shutil.rmtree(d, ignore_errors=True)
-                raise ToolError('look_user and change_user are two different accounts on the host: one that can only '
-                                'read, one that can change things (sudo); the look account must not be root. '
-                                'create_look=true makes the look account for you.')
+            shutil.rmtree(d, ignore_errors=True)
+            raise ToolError('look_user and change_user are two different accounts on the host: one that can only '
+                            'read, one that can change things (sudo); the look account must not be root. '
+                            'create_look=true makes the look account for you.')
+        if kind == 'synology' and look_u == change_u:
             warn = ('\n\nNote: Synology DSM lets only administrators log in over SSH, so reads run as %s too. They '
                     'still only read, but the account could change things.' % look_u)
         if kind in ('windows', 'macos') and look_u == change_u:
@@ -1201,7 +1220,7 @@ class Server:
                 what = 'logs in' + (' as an administrator' if account == 'change' else '')
                 out.append('%s account: %s' % (account, what if ok else 'FAILED: %s' % txt.strip()[-300:]))
             return '\n'.join(out)
-        if kind == 'macos':
+        if kind in POSIX_SSH:
             out = []
             for account in ('look', 'change'):
                 rc, txt = routeros.ssh_exec(hv, hv['asm_%s_user' % account], self.cfg.known_hosts,
@@ -1209,6 +1228,8 @@ class Server:
                                             key=hv.get('asm_%s_key' % account), timeout=30)
                 what = 'logs in' + (' and can sudo' if account == 'change' else '')
                 out.append('%s account: %s' % (account, what if rc == 0 else 'FAILED: %s' % txt.strip()[-300:]))
+            if kind == 'synology':
+                return '\n'.join(out)
             rc, py = routeros.ssh_exec(hv, hv['asm_look_user'], self.cfg.known_hosts,
                                        '/usr/bin/xcode-select -p >/dev/null 2>&1 && /usr/bin/python3 --version',
                                        key=hv.get('asm_look_key'), timeout=30)
@@ -1318,13 +1339,16 @@ class Server:
                 rc, txt = routeros.ssh_exec(hv, hv['asm_look_user'], self.cfg.known_hosts, ow_cmd,
                                             key=hv.get('asm_look_key'), timeout=int(a.get('timeout') or 120))
                 per[h] = txt.rstrip() + ('' if rc == 0 else '\n[exit %s]' % rc)
-        mac_hosts = [h for h in self._resolve(pattern) if hs.get(h, {}).get('asm_kind') == 'macos']
+        mac_hosts = [h for h in self._resolve(pattern) if hs.get(h, {}).get('asm_kind') in POSIX_SSH]
         if mac_hosts:
-            mac_cmd = command or READS['macos'].get(read or '')
             for h in mac_hosts:
                 hv = hs[h]
+                k = hv.get('asm_kind')
+                mac_cmd = command or READS[k].get(read or '')
+                if read == 'logs' and k == 'synology' and (a.get('unit') or a.get('container')):
+                    mac_cmd = None
                 if not mac_cmd:
-                    per[h] = '(no %s read for macOS)' % read
+                    per[h] = '(no %s read for %s)' % (read, 'macOS' if k == 'macos' else 'Synology')
                     continue
                 rc, txt = routeros.ssh_exec(hv, hv['asm_look_user'], self.cfg.known_hosts, mac_cmd,
                                             key=hv.get('asm_look_key'), timeout=int(a.get('timeout') or 120))
@@ -1558,6 +1582,7 @@ class Server:
                 rel, ', '.join(targets), h[:12],
                 'approved before, apply runs without asking' if approved else 'not approved yet, apply will ask',
                 {'routeros': routeros_plan_text, 'openwrt': openwrt_plan_text, 'macos': macos_plan_text,
+                 'synology': lambda p, t: macos_plan_text(p, t, 'a systemd timer'),
                  'windows': windows_plan_text}[kind](path, targets))
         plan = self._plan(path, limit, params)
         h = version_hash(self.cfg, rel, targets)
@@ -1590,14 +1615,15 @@ class Server:
         for s in extra_services:
             if not isinstance(s, str) or not re.match(r'^[A-Za-z0-9@._-]{1,120}$', s):
                 raise ToolError('services: unit names')
-        if kind in ('macos', 'windows'):
+        if kind in ('macos', 'synology', 'windows'):
             other = non_raw_tasks(path)
             if other:
                 raise ToolError('%s hosts run raw commands only (no Python needed there); these tasks are not: %s. '
                                 'Write them as ansible.builtin.raw commands.' % (
-                                    'macOS' if kind == 'macos' else 'Windows', ', '.join(map(str, other[:8]))))
-        if kind == 'macos' and not extra_paths:
-            raise ToolError('macOS changes need paths=[...]: the files and folders the commands change. Only those are '
+                                    {'macos': 'macOS', 'synology': 'Synology'}.get(kind, 'Windows'),
+                                    ', '.join(map(str, other[:8]))))
+        if kind in POSIX_SSH and not extra_paths:
+            raise ToolError('macOS and Synology changes need paths=[...]: the files and folders the commands change. Only those are '
                             'snapshotted and restored on a revert.')
         if kind == 'windows':
             if not extra_paths:
@@ -1632,8 +1658,9 @@ class Server:
                 plan, plan_txt = None, openwrt_plan_text(path, targets)
             elif kind == 'windows':
                 plan, plan_txt = None, windows_plan_text(path, targets)
-            elif kind == 'macos':
-                plan, plan_txt = None, macos_plan_text(path, targets)
+            elif kind in POSIX_SSH:
+                plan, plan_txt = None, macos_plan_text(path, targets, 'a launchd daemon' if kind == 'macos'
+                                                       else 'a systemd timer')
             else:
                 plan = self._plan(path, limit, params)
                 unreachable = [x for x in targets if (plan.get(x) or {}).get('unreachable')]
@@ -1660,8 +1687,9 @@ class Server:
                     self._run_openwrt(job_id, path, vf, targets, checks, window)
                 elif kind == 'windows':
                     self._run_windows(job_id, path, targets, checks, window, extra_paths)
-                elif kind == 'macos':
-                    self._run_macos(job_id, path, vf, targets, checks, window, extra_paths, extra_services)
+                elif kind in POSIX_SSH:
+                    self._run_macos(job_id, path, vf, targets, checks, window, extra_paths, extra_services,
+                                    GUARD_DIR[kind])
                 else:
                     self._run_routeros(job_id, path, vf, targets, checks, window)
                 return
@@ -1726,15 +1754,15 @@ class Server:
             self.approvals.add(h, rel, targets)
         return ok, True, how
 
-    def _run_macos(self, job_id, path, vf, targets, checks, window, paths, services):
-        """macOS: the collection's guard script (launchd backend) installed over SSH; no Python needed."""
+    def _run_macos(self, job_id, path, vf, targets, checks, window, paths, services, D='/var/db/ansible-confirmed'):
+        """macOS and Synology: the collection's guard script installed over SSH (launchd or systemd backend); no
+        Python needed on the host."""
         jd = os.path.join(self.cfg.jobs, job_id)
         progress = os.path.join(jd, 'progress.log')
 
         def note(msg):
             with open(progress, 'a') as f:
                 f.write('%s %s\n' % (time.strftime('%H:%M:%S'), msg))
-        D = '/var/db/ansible-confirmed'
         G = 'sudo -n env ANSIBLE_CONFIRMED_DIR=%s /bin/sh %s/guard.sh' % (D, D)
         guard_sh = collection_guard_sh(self.cfg)
         q = shlex.quote
@@ -2265,7 +2293,9 @@ class Server:
         slug = re.sub(r'[^a-z0-9]+', '-', why.lower()).strip('-')[:40] or 'oneoff'
         rel = 'oneoffs/%s-%s.yml' % (time.strftime('%Y%m%d-%H%M'), slug)
         routeros_task = a.get('kind') == 'routeros' or (kinds == {'routeros'})
-        mod = 'ansible.builtin.raw' if routeros_task else 'ansible.builtin.shell'
+        tkinds = {hs.get(h, {}).get('asm_kind', 'linux') for h in self._resolve(pattern)}
+        raw_only = routeros_task or (tkinds and tkinds <= set(SERVER_GUARDED))
+        mod = 'ansible.builtin.raw' if raw_only else 'ansible.builtin.shell'
         body = ['# One-off (hands): %s' % why.replace('\n', ' '), '- name: %s' % json.dumps(why[:120]),
                 '  hosts: %s' % json.dumps(pattern), '  gather_facts: false']
         if not routeros_task:
@@ -2365,7 +2395,7 @@ class Server:
                     re.search(r'[\x00-\x1f]', p) or len(p) > 1000:
                 raise ToolError('paths: absolute paths only (/etc/x, C:\\x or HKLM:\\x), no "..": %r' % p)
         kinds = {h: hs[h].get('asm_kind', 'linux') for h in targets}
-        need = [h for h in targets if kinds[h] in ('linux', 'macos', 'windows')]
+        need = [h for h in targets if kinds[h] in ('linux', 'macos', 'synology', 'windows')]
         if need and not paths:
             raise ToolError('paths=[...] is needed for %s (Linux, macOS and Windows hosts back up the paths you '
                             'list; routers back up their whole config)' % ', '.join(need))
@@ -2401,9 +2431,9 @@ class Server:
                     files.append(('uci-export.txt', data, True))
                 else:
                     errors.append('uci export: exit %s %s' % (rc, err.strip()[-300:]))
-            elif kind in ('linux', 'macos') and not [p for p in paths if p.startswith('/')]:
+            elif kind in ('linux', 'macos', 'synology') and not [p for p in paths if p.startswith('/')]:
                 errors.append('no POSIX paths (/...) given for this host')
-            elif kind in ('linux', 'macos'):
+            elif kind in ('linux', 'macos', 'synology'):
                 rc, data, err = routeros.ssh_exec_bytes(
                     hv, cu, kh, 'sudo -n tar -czf - -- %s' % ' '.join(q(p) for p in paths if p.startswith('/')),
                     key=ck)

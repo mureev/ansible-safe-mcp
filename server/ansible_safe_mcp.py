@@ -566,6 +566,10 @@ def version_hash(cfg, rel, targets, tags=()):
                 add('file:' + relf, f.read())
     # folders outside the project that its plays read (e.g. your repo's stacks/), named in ansible-safe.yml
     for extra in approve_also(cfg):
+        if os.path.isfile(extra):
+            with open(extra, 'rb') as f:
+                add('also:' + os.path.relpath(extra, cfg.project), f.read())
+            continue
         for dirpath, dirnames, filenames in os.walk(extra):
             dirnames[:] = sorted(d for d in dirnames if d != '.git')
             for fn in sorted(filenames):
@@ -579,7 +583,7 @@ def version_hash(cfg, rel, targets, tags=()):
 
 
 def approve_also(cfg):
-    """`approve_also` in <project>/ansible-safe.yml: folders outside the project that plays read (copy src from
+    """`approve_also` in <project>/ansible-safe.yml: folders or files outside the project that plays read (copy src from
     {{ playbook_dir }}/../stacks, say). They become part of every approved version. The server never writes that
     file; only you do."""
     p = os.path.join(cfg.project, 'ansible-safe.yml')
@@ -593,8 +597,8 @@ def approve_also(cfg):
     out = []
     for x in (data.get('approve_also') or []) if isinstance(data, dict) else []:
         d = os.path.realpath(os.path.join(cfg.project, str(x)))
-        if not os.path.isdir(d):
-            raise ToolError('ansible-safe.yml: approve_also %r is not a folder' % x)
+        if not os.path.exists(d):
+            raise ToolError('ansible-safe.yml: approve_also %r does not exist' % x)
         out.append(d)
     return out
 

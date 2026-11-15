@@ -131,7 +131,12 @@ ssh_args = -o ControlMaster=auto -o ControlPersist=60s -o BatchMode=yes -o UserK
         with open(self.ansible_cfg, 'w') as f:
             f.write(cfg)
         if shutil.which('git') and not os.path.isdir(os.path.join(self.project, '.git')):
-            subprocess.run(['git', 'init', '-q'], cwd=self.project, capture_output=True)
+            # a project folder inside an existing repo (your infra repo's ansible/) stays part of that repo:
+            # no nested .git, and the server leaves committing to you
+            inside = subprocess.run(['git', 'rev-parse', '--is-inside-work-tree'], cwd=self.project,
+                                    capture_output=True, text=True)
+            if inside.returncode != 0 or inside.stdout.strip() != 'true':
+                subprocess.run(['git', 'init', '-q'], cwd=self.project, capture_output=True)
 
 
 class Audit:
@@ -559,10 +564,39 @@ def version_hash(cfg, rel, targets, tags=()):
                 continue
             with open(os.path.join(dirpath, fn), 'rb') as f:
                 add('file:' + relf, f.read())
+    # folders outside the project that its plays read (e.g. your repo's stacks/), named in ansible-safe.yml
+    for extra in approve_also(cfg):
+        for dirpath, dirnames, filenames in os.walk(extra):
+            dirnames[:] = sorted(d for d in dirnames if d != '.git')
+            for fn in sorted(filenames):
+                fp = os.path.join(dirpath, fn)
+                with open(fp, 'rb') as f:
+                    add('also:' + os.path.relpath(fp, cfg.project), f.read())
     if tags:
         add('tags', json.dumps(list(tags)).encode())
     add('targets', json.dumps(sorted(targets)).encode())
     return h.hexdigest()
+
+
+def approve_also(cfg):
+    """`approve_also` in <project>/ansible-safe.yml: folders outside the project that plays read (copy src from
+    {{ playbook_dir }}/../stacks, say). They become part of every approved version. The server never writes that
+    file; only you do."""
+    p = os.path.join(cfg.project, 'ansible-safe.yml')
+    if not os.path.exists(p):
+        return []
+    try:
+        with open(p) as f:
+            data = yaml.load(f, Loader=lint.Loader) or {}
+    except (OSError, yaml.YAMLError) as e:
+        raise ToolError('ansible-safe.yml: %s' % str(e).splitlines()[0])
+    out = []
+    for x in (data.get('approve_also') or []) if isinstance(data, dict) else []:
+        d = os.path.realpath(os.path.join(cfg.project, str(x)))
+        if not os.path.isdir(d):
+            raise ToolError('ansible-safe.yml: approve_also %r is not a folder' % x)
+        out.append(d)
+    return out
 
 
 def params_schema(path):

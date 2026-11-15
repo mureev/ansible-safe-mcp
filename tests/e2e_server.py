@@ -522,6 +522,24 @@ check('rename: the host moves, no approval asked', not e and 'box9' in t2 and '\
       and asked() == n0 + 3, t + t2)
 tool('hosts', action='rename', name='box9', new_name='box')
 
+# ---- approve_also: a folder outside the project that plays read is part of the approved version
+also = os.path.join(W, 'stacks-x')
+os.makedirs(also, exist_ok=True)
+open(also + '/compose.yml', 'w').write('a: 1\n')
+os.makedirs(gv, exist_ok=True)
+open(gv + '/all.yml', 'w').write('greeting: changed\n')
+open(os.path.join(W, 'project', 'ansible-safe.yml'), 'w').write('approve_also: [../stacks-x]\n')
+n1 = asked()
+t, e = tool('apply', playbook='playbooks/tagged.yml', window='60s', wait_s=65)
+check('approve_also: naming a folder makes a new version (asks)', 'CONFIRMED' in t and asked() == n1 + 1, t)
+t, e = tool('apply', playbook='playbooks/tagged.yml', window='60s', wait_s=65)
+check('approve_also: unchanged, it does not ask', 'CONFIRMED' in t and asked() == n1 + 1, t)
+open(also + '/compose.yml', 'w').write('a: 2\n')
+t, e = tool('apply', playbook='playbooks/tagged.yml', window='60s', wait_s=65)
+check('approve_also: a changed file there asks again', 'CONFIRMED' in t and asked() == n1 + 2, t)
+os.remove(os.path.join(W, 'project', 'ansible-safe.yml'))
+shutil.rmtree(gv)
+
 # ---- a job whose server is gone is reported as interrupted, not running forever
 jdir = os.path.join(W, 'state', 'jobs', 'deadbeef0001')
 os.makedirs(jdir, exist_ok=True)

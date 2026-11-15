@@ -28,6 +28,10 @@
 - **The approved version covers the whole project a play can pull in**: roles, files, templates, vars and
   `inventory/group_vars` / `host_vars` (now allowed, for the project's own variables; `ansible_*` and `asm_*` keys
   there are refused, since connection settings are the hosts tool's). A changed variable asks again.
+- **A project inside your own repo** (`ASM_PROJECT=~/infra/ansible`): the server makes no nested `.git` there and
+  leaves committing to you.
+- **`approve_also`** in `<project>/ansible-safe.yml`: folders outside the project that plays read (a repo's
+  `stacks/`) become part of every approved version. Only you write that file.
 - `install.sh` keeps the project folder and `ASM_MASK_DOMAINS` already in the Claude entry unless the environment
   sets them: `ASM_PROJECT=~/repo/ops ASM_MASK_DOMAINS=example.org bash install.sh` once, plain `bash install.sh` after.
 - **`hosts action=rename`** (no approval: it grants nothing); hosts that went through it as a jump follow.

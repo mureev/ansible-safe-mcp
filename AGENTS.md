@@ -23,6 +23,15 @@ This project brings commit-confirmed to everything Ansible manages, and gives Cl
 
 Ready-made playbooks for common chores are in [`examples/`](examples/README.md).
 
+**Your project in your own repo.** Point `ASM_PROJECT` at a folder of your infra repo (`ASM_PROJECT=~/infra/ansible
+bash install.sh` once; later installs keep it). The server then makes no nested `.git` and leaves committing to you.
+If plays read files outside that folder (`{{ playbook_dir }}/../../stacks`), name those folders in
+`<project>/ansible-safe.yml` so a change there needs a new approval:
+
+```yaml
+approve_also: [../stacks]
+```
+
 ## How a change runs
 
 ![Five gates between Claude and your hosts](docs/gates.svg)
@@ -201,7 +210,7 @@ JSON on stdin and approves by exiting 0).
   change stays; a failed check reverts at once; a second arm is refused; and a `DenyUsers` change that locks Ansible
   out is put back by the host at the deadline.
 - `tests/test_redact.py`: the output masking, including hostile input that must stay fast.
-- `tests/e2e_server.py`: the MCP server over stdio, 94 checks: adding a host, reads as the look account (not
+- `tests/e2e_server.py`: the MCP server over stdio, 97 checks: adding a host, reads as the look account (not
   templated, no sudo), every lint refusal, plan, approve once, rerun without asking, edited playbook asks again,
   decline, a half-failed change reverted at once, the lockout, a tampered inventory, the audit log's hash chain, and
   macOS's server-driven guard, RouterOS under Safe Mode against a stand-in console (confirm; a lockout undone through the held session; a bad

@@ -12,7 +12,7 @@ with open(os.path.join(W, 'approver.py'), 'w') as f:
     f.write('import json,os,sys,time\nr=json.load(sys.stdin)\nopen(%r,"a").write(json.dumps(r)+"\\n")\n'
             'time.sleep(8 if os.path.exists(%r) else 0)\n'
             'sys.exit(1 if os.path.exists(%r) else 0)\n' % (LOG, os.path.join(W, 'SLOW'), os.path.join(W, 'DENY')))
-env = dict(os.environ, ASM_PROJECT=W + '/project', ASM_STATE=W + '/state', ASM_TEST_SHORT_WINDOWS='1',
+env = dict(os.environ, ASM_PROJECT=W + '/project', ASM_STATE=W + '/state', ASM_TEST_SHORT_WINDOWS='1', ASM_TEST_PLAN_DELAY='12',
            ASM_APPROVER='%s %s/approver.py' % (sys.executable, W))
 srv = subprocess.Popen([sys.executable, os.path.join(ROOT, 'server', 'ansible_safe_mcp.py')], env=env,
                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
@@ -539,6 +539,20 @@ t, e = tool('apply', playbook='playbooks/tagged.yml', window='60s', wait_s=65)
 check('approve_also: a changed file there asks again', 'CONFIRMED' in t and asked() == n1 + 2, t)
 os.remove(os.path.join(W, 'project', 'ansible-safe.yml'))
 shutil.rmtree(gv)
+
+# ---- a plan that outlasts wait_s becomes a job (the desktop bridge waits ~80 s per call)
+slow = """- hosts: box
+  gather_facts: false
+  tasks:
+    - name: take a while
+      ansible.builtin.ping:
+"""
+tool('playbook', action='write', path='playbooks/slow.yml', content=slow)
+t, e = tool('plan', playbook='playbooks/slow.yml', wait_s=5)
+jid = re.search(r'Job (\w+)', t)
+check('slow plan: returns a job id instead of blocking', not e and jid and 'still running' in t, t)
+t2, e2 = tool('job', action='status', id=jid.group(1) if jid else 'x', wait_s=40)
+check('slow plan: job status gives the plan when done', not e2 and 'playbooks/slow.yml on box' in t2, t2)
 
 # ---- a job whose server is gone is reported as interrupted, not running forever
 jdir = os.path.join(W, 'state', 'jobs', 'deadbeef0001')

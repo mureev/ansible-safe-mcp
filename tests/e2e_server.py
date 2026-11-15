@@ -432,6 +432,53 @@ finally:
     tool('hosts', action='remove', name='box3')
     tool('hosts', action='remove', name='nas')
 
+# ---- tags, inventory group_vars in the approved version, rename
+tagged = """- hosts: box
+  become: true
+  gather_facts: false
+  tasks:
+    - name: always part
+      ansible.builtin.copy: {dest: /etc/asm-tag-a, content: "{{ asm_greeting }}\\n"}
+    - name: t2 part
+      ansible.builtin.copy: {dest: /etc/asm-tag-b, content: "b\\n"}
+      tags: [t2]
+"""
+for f in ('/etc/asm-tag-a', '/etc/asm-tag-b'):
+    if os.path.exists(f):
+        os.remove(f)
+gv = os.path.join(W, 'project', 'inventory', 'group_vars')
+os.makedirs(gv, exist_ok=True)
+open(gv + '/all.yml', 'w').write('asm_greeting: hello\n')
+tool('playbook', action='write', path='playbooks/tagged.yml', content=tagged)
+t, e = tool('plan', playbook='playbooks/tagged.yml')
+check('inventory group_vars: a server setting there is refused', e and 'asm_greeting' in t, t)
+open(gv + '/all.yml', 'w').write('greeting: hello\n')
+tagged = tagged.replace('asm_greeting', 'greeting')
+tool('playbook', action='write', path='playbooks/tagged.yml', content=tagged)
+t, e = tool('plan', playbook='playbooks/tagged.yml', tags=['t2'])
+check('tags: the plan runs only the tagged tasks', not e and '(--tags t2)' in t and 't2 part' in t
+      and 'always part' not in t, t)
+n0 = asked()
+t, e = tool('apply', playbook='playbooks/tagged.yml', tags=['t2'], window='60s', wait_s=65)
+check('tags: apply arms, runs only t2 tasks, confirms', 'CONFIRMED' in t and os.path.exists('/etc/asm-tag-b')
+      and not os.path.exists('/etc/asm-tag-a') and asked() == n0 + 1, t)
+t, e = tool('apply', playbook='playbooks/tagged.yml', window='60s', wait_s=65)
+check('tags are part of the version: without them it asks again', 'CONFIRMED' in t and asked() == n0 + 2
+      and open('/etc/asm-tag-a').read() == 'hello\n', t)
+open(gv + '/all.yml', 'w').write('greeting: changed\n')
+t, e = tool('apply', playbook='playbooks/tagged.yml', window='60s', wait_s=65)
+check('a change in inventory group_vars asks again', 'CONFIRMED' in t and asked() == n0 + 3
+      and open('/etc/asm-tag-a').read() == 'changed\n', t)
+open(gv + '/all.yml', 'w').write('ansible_connection: local\n')
+t, e = tool('plan', playbook='playbooks/tagged.yml')
+check('inventory group_vars: ansible_connection is refused', e and 'ansible_connection' in t, t)
+shutil.rmtree(gv)
+t, e = tool('hosts', action='rename', name='box', new_name='box9')
+t2, e2 = tool('hosts', action='list')
+check('rename: the host moves, no approval asked', not e and 'box9' in t2 and '\nbox ' not in '\n' + t2
+      and asked() == n0 + 3, t + t2)
+tool('hosts', action='rename', name='box9', new_name='box')
+
 # ---- a job whose server is gone is reported as interrupted, not running forever
 jdir = os.path.join(W, 'state', 'jobs', 'deadbeef0001')
 os.makedirs(jdir, exist_ok=True)

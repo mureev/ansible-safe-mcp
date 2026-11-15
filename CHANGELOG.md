@@ -17,6 +17,12 @@
   task restored it at the deadline.
 - Two host adds waiting on the user at the same time no longer lose one of them: the inventory is re-read and
   written under a lock.
+- **`tags` and `skip_tags`** on plan and apply (Linux plays): part of the approved version; the safety net's arm
+  and confirm run whatever the tags.
+- **The approved version covers the whole project a play can pull in**: roles, files, templates, vars and
+  `inventory/group_vars` / `host_vars` (now allowed, for the project's own variables; `ansible_*` and `asm_*` keys
+  there are refused, since connection settings are the hosts tool's). A changed variable asks again.
+- **`hosts action=rename`** (no approval: it grants nothing); hosts that went through it as a jump follow.
 - `examples/`: apt updates, Docker Compose updates, Windows Update (through a SYSTEM task), keep-awake for Windows
   and macOS.
 - `look` across kinds sends only Linux hosts through Ansible; macOS, Windows, RouterOS and OpenWrt are read over

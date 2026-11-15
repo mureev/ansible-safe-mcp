@@ -237,9 +237,29 @@ def check_inventory(cfg):
     variable added by hand or by another tool could make a play run on the Mac)."""
     inv = load_inventory(cfg)
     bad = []
+    # group_vars / host_vars next to the inventory hold the project's own variables; connection settings stay the
+    # server's (an ansible_connection: local there would run a play on the Mac)
     for extra in ('group_vars', 'host_vars'):
-        if os.path.exists(os.path.join(os.path.dirname(cfg.inventory), extra)):
-            bad.append('inventory/%s exists; the server does not use it' % extra)
+        base = os.path.join(os.path.dirname(cfg.inventory), extra)
+        for dirpath, _, files in os.walk(base):
+            for fn in files:
+                fp = os.path.join(dirpath, fn)
+                rel = os.path.relpath(fp, os.path.dirname(os.path.dirname(cfg.inventory)))
+                if os.path.islink(fp):
+                    bad.append('%s is a symlink' % rel)
+                    continue
+                try:
+                    with open(fp) as f:
+                        data = yaml.load(f, Loader=lint.Loader) or {}
+                except (OSError, yaml.YAMLError) as e:
+                    bad.append('%s: not readable YAML (%s)' % (rel, str(e).splitlines()[0]))
+                    continue
+                if not isinstance(data, dict):
+                    bad.append('%s: not a mapping of variables' % rel)
+                    continue
+                for k in data:
+                    if str(k).startswith(('ansible_', 'asm_')):
+                        bad.append('%s sets %s: connection and server settings belong to the hosts tool' % (rel, k))
     for k in inv['all']:
         if k not in ('hosts', 'children'):
             bad.append('all.%s: only hosts and children are allowed' % k)
@@ -498,8 +518,13 @@ def playbook_path(cfg, rel):
     return path, norm
 
 
-def version_hash(cfg, rel, targets):
-    """What an approval binds to: this playbook, everything it can pull in, and the hosts. Not sibling playbooks."""
+HASH_SKIP_DIRS = {'.git', 'checks', 'oneoffs', 'playbooks', '__pycache__', 'docs'}
+
+
+def version_hash(cfg, rel, targets, tags=()):
+    """What an approval binds to: this playbook, everything in the project it can pull in (roles, files,
+    templates, vars, inventory group_vars/host_vars), the tags and the hosts. Not sibling playbooks or one-offs,
+    and not the server-written inventory/hosts.yml (accounts and addresses; the hosts are bound by name)."""
     h = hashlib.sha256()
 
     def add(label, data):
@@ -508,15 +533,30 @@ def version_hash(cfg, rel, targets):
     with open(os.path.join(cfg.project, rel), 'rb') as f:
         add('playbook:' + rel, f.read())
     top = os.path.dirname(rel)
-    for base in (top, 'roles'):
-        for dirpath, dirnames, filenames in os.walk(os.path.join(cfg.project, base)):
-            dirnames.sort()
-            reld = os.path.relpath(dirpath, cfg.project)
-            if base == top and reld == top:
-                continue  # sibling playbooks are not part of this one
-            for fn in sorted(filenames):
-                with open(os.path.join(dirpath, fn), 'rb') as f:
-                    add('file:' + os.path.join(reld, fn), f.read())
+    # the playbook's own folder: its subfolders (group_vars, templates, files next to it), not sibling playbooks
+    for dirpath, dirnames, filenames in os.walk(os.path.join(cfg.project, top)):
+        dirnames.sort()
+        reld = os.path.relpath(dirpath, cfg.project)
+        if reld == top:
+            continue
+        for fn in sorted(filenames):
+            with open(os.path.join(dirpath, fn), 'rb') as f:
+                add('file:' + os.path.join(reld, fn), f.read())
+    # everything else in the project
+    for dirpath, dirnames, filenames in os.walk(cfg.project):
+        reld = os.path.relpath(dirpath, cfg.project)
+        if reld == '.':
+            dirnames[:] = sorted(d for d in dirnames if d not in HASH_SKIP_DIRS and not d.startswith('.'))
+            continue
+        dirnames.sort()
+        for fn in sorted(filenames):
+            relf = os.path.join(reld, fn)
+            if relf == os.path.join('inventory', 'hosts.yml') or fn.endswith('.md'):
+                continue
+            with open(os.path.join(dirpath, fn), 'rb') as f:
+                add('file:' + relf, f.read())
+    if tags:
+        add('tags', json.dumps(list(tags)).encode())
     add('targets', json.dumps(sorted(targets)).encode())
     return h.hexdigest()
 
@@ -1022,6 +1062,30 @@ class Server:
             if name not in hs:
                 raise ToolError('no host %s' % name)
             return self._test_host(name)
+        if action == 'rename':
+            new = str(a.get('new_name') or '')
+            if name not in hs:
+                raise ToolError('no host %s' % name)
+            if not NAME_RE.match(new) or new in ('localhost', 'all', 'ungrouped') or new in KINDS:
+                raise ToolError('new_name: letters, digits, . _ -; not localhost/all or a kind name')
+            with INVENTORY_LOCK:
+                inv = load_inventory(self.cfg)
+                if new in inv['all']['hosts']:
+                    raise ToolError('%s is already in the inventory' % new)
+                inv['all']['hosts'][new] = inv['all']['hosts'].pop(name)
+                for g in inv['all']['children'].values():
+                    gh = (g or {}).get('hosts') or {}
+                    if name in gh:
+                        gh[new] = gh.pop(name)
+                moved = []
+                for hn, hv in inv['all']['hosts'].items():
+                    if hv and hv.get('asm_jump') == name:
+                        hv['asm_jump'] = new
+                        moved.append(hn)
+                save_inventory(self.cfg, inv)
+            self.audit.write('hosts', summary='renamed %s to %s' % (name, new))
+            return 'Renamed %s to %s%s. Approvals name hosts, so playbooks for it ask again once.' % (
+                name, new, ('; %s now go through %s' % (', '.join(moved), new)) if moved else '')
         if action == 'setup':
             if name not in hs:
                 raise ToolError('no host %s' % name)
@@ -1038,7 +1102,7 @@ class Server:
                 return 'Not changed: the user declined (%s).' % how
             return self._install_look_allowlist(name)
         if action != 'add':
-            raise ToolError('action must be list, add, test, setup or remove')
+            raise ToolError('action must be list, add, test, setup, rename or remove')
         address = a.get('address') or name
         port = int(a.get('port') or 22)
         kind = a.get('kind', 'linux')
@@ -1576,13 +1640,25 @@ class Server:
         if jumps:
             raise ToolError('%s: jump hosts only carry connections; limit the playbook to other hosts' %
                             ', '.join(jumps))
-        return path, rel, limit, params, targets
+        tag_args = []
+        for key, flag in (('tags', '--tags'), ('skip_tags', '--skip-tags')):
+            v = a.get(key)
+            if not v:
+                continue
+            vals = v if isinstance(v, list) else str(v).split(',')
+            vals = [str(x).strip() for x in vals if str(x).strip()]
+            if not vals or not all(re.match(r'^[A-Za-z0-9_-]{1,60}$', x) for x in vals) or len(vals) > 20:
+                raise ToolError('%s: tag names (letters, digits, _ -)' % key)
+            tag_args += [flag, ','.join(vals)]
+        if tag_args and any(hs[t].get('asm_kind', 'linux') != 'linux' for t in targets):
+            raise ToolError('tags work on Linux hosts (Ansible runs the play there); the other kinds run commands')
+        return path, rel, limit, params, targets, tag_args
 
-    def _plan(self, path, limit, params):
+    def _plan(self, path, limit, params, tag_args=()):
         d = scratch(self.cfg, 'plan')
         vf = os.path.join(d, 'vars.yml')
         write_vars(vf, 'change', params)
-        doc, err, rc = run_playbook(self.cfg, path, vf, limit=limit, check=True, timeout=600)
+        doc, err, rc = run_playbook(self.cfg, path, vf, limit=limit, check=True, timeout=600, extra=tag_args)
         shutil.rmtree(d, ignore_errors=True)
         if doc is None:
             raise ToolError('the plan could not run: %s' % err[-2500:])
@@ -1590,7 +1666,7 @@ class Server:
 
     # ---- tool: plan
     def t_plan(self, a):
-        path, rel, limit, params, targets = self._prepare(a)
+        path, rel, limit, params, targets, tag_args = self._prepare(a)
         kind = self._kind_of(targets)
         if kind in SERVER_GUARDED:
             h = version_hash(self.cfg, rel, targets)
@@ -1602,12 +1678,13 @@ class Server:
                 {'routeros': routeros_plan_text, 'openwrt': openwrt_plan_text, 'macos': macos_plan_text,
                  'synology': lambda p, t: macos_plan_text(p, t, 'a systemd timer'),
                  'windows': windows_plan_text}[kind](path, targets))
-        plan = self._plan(path, limit, params)
-        h = version_hash(self.cfg, rel, targets)
+        plan = self._plan(path, limit, params, tag_args)
+        h = version_hash(self.cfg, rel, targets, tag_args)
         approved = self.approvals.approved(h, rel, targets)
-        self.audit.write('plan', summary='%s on %s' % (rel, ','.join(targets)), version=h[:12])
-        return '%s on %s\nversion %s: %s\n\n%s' % (
-            rel, ', '.join(targets), h[:12],
+        self.audit.write('plan', summary='%s on %s%s' % (rel, ','.join(targets), (' ' + ' '.join(tag_args))
+                                                         if tag_args else ''), version=h[:12])
+        return '%s on %s%s\nversion %s: %s\n\n%s' % (
+            rel, ', '.join(targets), (' (%s)' % ' '.join(tag_args)) if tag_args else '', h[:12],
             'approved before, apply runs without asking' if approved else 'not approved yet, apply will ask the user',
             plan_text(plan))
 
@@ -1615,7 +1692,7 @@ class Server:
     def t_apply(self, a):
         """Starts the change as a job and answers within wait_s (below the ~80 s a remote client waits), whether
         it is still planning, waiting for the user's approval, running, or done."""
-        path, rel, limit, params, targets = self._prepare(a)
+        path, rel, limit, params, targets, tag_args = self._prepare(a)
         kind = self._kind_of(targets)
         try:
             window = parse_window(a.get('window', '10m'))
@@ -1649,11 +1726,12 @@ class Server:
                                 'or folders the commands change. Only those are snapshotted and restored on a revert.')
             if any('{{' in c or '{%' in c for _, c in routeros_commands(path)):
                 raise ToolError('Windows playbooks run their raw commands as written (no templating): remove {{ }}')
-        h = version_hash(self.cfg, rel, targets)
+        h = version_hash(self.cfg, rel, targets, tag_args)
         job_id = time.strftime('%m%d%H%M') + secrets.token_hex(2)
         os.makedirs(os.path.join(self.cfg.jobs, job_id), mode=0o700)
         job = {'id': job_id, 'playbook': rel, 'targets': targets, 'version': h, 'params': params, 'window': window,
-               'started': time.time(), 'status': 'planning', 'asked': False, 'kind': kind, 'pid': os.getpid()}
+               'started': time.time(), 'status': 'planning', 'asked': False, 'kind': kind, 'pid': os.getpid(),
+               'tags': tag_args}
         self._save_job(job)
         args = (job_id, path, rel, limit, params, targets, window, checks, extra_paths, extra_services, h)
         t = threading.Thread(target=self._apply_flow, args=args, daemon=True)
@@ -1680,7 +1758,7 @@ class Server:
                 plan, plan_txt = None, macos_plan_text(path, targets, 'a launchd daemon' if kind == 'macos'
                                                        else 'a systemd timer')
             else:
-                plan = self._plan(path, limit, params)
+                plan = self._plan(path, limit, params, self._load_job(job_id).get('tags') or [])
                 unreachable = [x for x in targets if (plan.get(x) or {}).get('unreachable')]
                 if unreachable:
                     self._set(job_id, status='failed', error='the plan could not reach %s; nothing was changed.\n\n%s'
@@ -1724,6 +1802,7 @@ class Server:
                     '  hosts: %s' % json.dumps(hosts_pat),
                     '  gather_facts: false',
                     '  become: true',
+                    '  tags: [always]',
                     '  tasks:',
                     '    - mureev.confirmed.arm:',
                     '        id: %s' % json.dumps(job_id),
@@ -1736,13 +1815,15 @@ class Server:
                     '  hosts: %s' % json.dumps(hosts_pat),
                     '  gather_facts: false',
                     '  become: true',
+                    '  tags: [always]',
                     '  tasks:',
                     '    - mureev.confirmed.confirm:',
                     '        id: %s' % json.dumps(job_id),
                     '        checks: %s' % yaml_val(checks),
                     '']))
             progress = os.path.join(jd, 'progress.log')
-            cmd = [self.cfg.playbook_bin, wrapper, '-e', '@' + vf, '--limit', hosts_pat]
+            cmd = [self.cfg.playbook_bin, wrapper, '-e', '@' + vf, '--limit', hosts_pat] + list(
+                self._load_job(job_id).get('tags') or [])
             proc = subprocess.Popen(cmd, cwd=self.cfg.project, env=ansible_env(self.cfg, progress),
                                     stdout=open(os.path.join(jd, 'stdout.log'), 'w'),
                                     stderr=open(os.path.join(jd, 'stderr.log'), 'w'),
@@ -2574,6 +2655,7 @@ def fmt_window(s):
 # ------------------------------------------------------------------------------------------------ MCP plumbing
 
 STR = {'type': 'string'}
+TAGS = {'type': 'array', 'items': {'type': 'string'}, 'description': 'Ansible tags (Linux plays), e.g. ["t2"]; part of the approved version'}
 TOOLS = [
     {'name': 'hosts', 'title': 'Hosts',
      'description': 'List, add, test or remove hosts in the inventory. Adding connects once as the look account, '
@@ -2582,7 +2664,8 @@ TOOLS = [
                     'journalctl through sudo (nothing else; it stays out of the docker group); setup re-installs that '
                     'on a host added before.',
      'inputSchema': {'type': 'object', 'properties': {
-         'action': {'type': 'string', 'enum': ['list', 'add', 'test', 'setup', 'remove']},
+         'action': {'type': 'string', 'enum': ['list', 'add', 'test', 'setup', 'rename', 'remove']},
+         'new_name': {'type': 'string', 'description': 'rename: the host\'s new name'},
          'name': STR, 'address': STR, 'port': {'type': 'integer'}, 'kind': {'type': 'string', 'enum': list(KINDS)},
          'look_user': STR, 'change_user': STR, 'key_file': STR,
          'look_key': {'type': 'string', 'description': 'key for the look account, if not key_file'},
@@ -2633,7 +2716,8 @@ TOOLS = [
      'description': 'Check mode with diff: what a playbook would change on each host, what would be snapshotted, '
                     'and whether this playbook version is already approved. Changes nothing.',
      'inputSchema': {'type': 'object', 'properties': {
-         'playbook': STR, 'limit': STR, 'params': {'type': 'object'}}, 'required': ['playbook']},
+         'playbook': STR, 'limit': STR, 'params': {'type': 'object'}, 'tags': TAGS, 'skip_tags': TAGS},
+        'required': ['playbook']},
      'annotations': {'readOnlyHint': True}},
     {'name': 'apply', 'title': 'Apply',
      'description': 'Run a playbook for real under the safety net: each host arms a revert timer, the change runs, '
@@ -2641,6 +2725,7 @@ TOOLS = [
                     'puts itself back. Asks the user the first time a playbook version (content + roles + hosts) is '
                     'run; unchanged versions rerun without asking. Waits up to wait_s, then returns a job id.',
      'inputSchema': {'type': 'object', 'properties': {
+         'tags': TAGS, 'skip_tags': TAGS,
          'playbook': STR, 'limit': STR, 'params': {'type': 'object'},
          'window': {'type': 'string', 'description': 'time to confirm before the host reverts: 10m (default), 90s'},
          'checks': {'type': 'array', 'items': STR,

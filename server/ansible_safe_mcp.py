@@ -48,6 +48,16 @@ POSIX_SSH = ('macos', 'synology')  # sudo hosts changed with raw commands over S
 GUARD_DIR = {'macos': '/var/db/ansible-confirmed', 'synology': '/var/lib/ansible-confirmed'}
 
 
+def pid_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, ValueError, OverflowError):
+        return True
+    return True
+
+
 def collection_guard_sh(cfg):
     """The collection's guard script, sent as is to macOS hosts (which may have no Python for modules)."""
     import importlib.util
@@ -1635,7 +1645,7 @@ class Server:
         job_id = time.strftime('%m%d%H%M') + secrets.token_hex(2)
         os.makedirs(os.path.join(self.cfg.jobs, job_id), mode=0o700)
         job = {'id': job_id, 'playbook': rel, 'targets': targets, 'version': h, 'params': params, 'window': window,
-               'started': time.time(), 'status': 'planning', 'asked': False, 'kind': kind}
+               'started': time.time(), 'status': 'planning', 'asked': False, 'kind': kind, 'pid': os.getpid()}
         self._save_job(job)
         args = (job_id, path, rel, limit, params, targets, window, checks, extra_paths, extra_services, h)
         t = threading.Thread(target=self._apply_flow, args=args, daemon=True)
@@ -2137,9 +2147,19 @@ class Server:
             raise ToolError('no such job')
         try:
             with open(os.path.join(self.cfg.jobs, job_id, 'job.json')) as f:
-                return json.load(f)
+                job = json.load(f)
         except (OSError, ValueError):
             raise ToolError('no such job: %s' % job_id)
+        # a job runs in a thread of the server that started it; if that server is gone (restarted, the app quit),
+        # nobody will finish it: say so instead of "running" forever. The hosts' own timers still revert.
+        if job.get('status') in ('planning', 'awaiting-approval', 'running') and job.get('pid') \
+                and job['pid'] != os.getpid() and not pid_alive(job['pid']):
+            job.update(status='interrupted', finished=time.time(),
+                       detail='the server that ran this job stopped (restart or the app quit) before it finished. '
+                              'Nothing was confirmed: an armed host restores itself at its deadline. '
+                              'Check with look(read="guard").')
+            self._save_job(job)
+        return job
 
     def _finish(self, job_id, proc):
         proc.wait()
@@ -2230,6 +2250,9 @@ class Server:
                 job_id, job['playbook'], v, job.get('error', ''))
         if st == 'failed':
             return 'Job %s: %s did not run. %s' % (job_id, job['playbook'], job.get('error', ''))
+        if st == 'interrupted':
+            return 'Job %s: %s on %s: INTERRUPTED: %s' % (job_id, job['playbook'], ', '.join(job['targets']),
+                                                         job.get('detail', ''))
         head = ('Approved by the user (version %s). ' % v) if job.get('asked') else (
             'Version %s was approved before: ran without asking. ' % v)
         lines = [head + 'Job %s: %s on %s, window %s.' % (job_id, job['playbook'], ', '.join(job['targets']),

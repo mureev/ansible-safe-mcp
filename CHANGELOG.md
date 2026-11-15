@@ -12,6 +12,9 @@
   changes them over plain SSH like macOS (raw commands with sudo, `paths=[...]`, the guard on a systemd timer), and,
   since DSM lets only administrators log in over SSH, one account may do both. Adding a DSM host as `linux` says so.
 - `hands` writes raw commands when every target is changed over plain SSH (macOS, Synology, Windows, routers).
+- A job whose server stopped mid-run (the app restarted when the network changed) is shown as interrupted, with
+  a pointer to the guard read, instead of "running" forever. Seen on a Windows PC behind a jump host: its SYSTEM
+  task restored it at the deadline.
 - `look` across kinds sends only Linux hosts through Ansible; macOS, Windows, RouterOS and OpenWrt are read over
   plain SSH even in a mixed pattern (a guard read over `all` showed a Mac behind a jump host as unreachable).
 - **`backup`**: pull a copy of hosts' configuration into `~/.local/state/ansible-safe-mcp/backups/<host>/<time>/`

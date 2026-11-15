@@ -432,6 +432,14 @@ finally:
     tool('hosts', action='remove', name='box3')
     tool('hosts', action='remove', name='nas')
 
+# ---- a job whose server is gone is reported as interrupted, not running forever
+jdir = os.path.join(W, 'state', 'jobs', 'deadbeef0001')
+os.makedirs(jdir, exist_ok=True)
+json.dump({'id': 'deadbeef0001', 'playbook': 'playbooks/x.yml', 'targets': ['box'], 'window': 60, 'version': 'v',
+           'started': 0, 'status': 'running', 'asked': False, 'kind': 'linux', 'pid': 999999}, open(jdir + '/job.json', 'w'))
+t, e = tool('job', action='status', id='deadbeef0001')
+check('job left running by a stopped server: reported as interrupted', 'INTERRUPTED' in t and 'deadline' in t, t)
+
 lines = open(W + '/state/audit.jsonl').read().splitlines()
 ok = True
 prev = '0' * 64

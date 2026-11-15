@@ -179,6 +179,9 @@ class Audit:
 
 # ------------------------------------------------------------------------------------------------ inventory
 
+INVENTORY_LOCK = threading.RLock()
+
+
 def load_inventory(cfg):
     try:
         with open(cfg.inventory) as f:
@@ -1007,10 +1010,12 @@ class Server:
         if action == 'remove':
             if name not in hs:
                 raise ToolError('no host %s' % name)
-            del inv['all']['hosts'][name]
-            for g in inv['all']['children'].values():
-                ((g or {}).get('hosts') or {}).pop(name, None)
-            save_inventory(self.cfg, inv)
+            with INVENTORY_LOCK:
+                inv = load_inventory(self.cfg)
+                inv['all']['hosts'].pop(name, None)
+                for g in inv['all']['children'].values():
+                    ((g or {}).get('hosts') or {}).pop(name, None)
+                save_inventory(self.cfg, inv)
             self.audit.write('hosts', summary='removed %s' % name)
             return 'Removed %s from the inventory (its pinned host key stays in known_hosts).' % name
         if action == 'test':
@@ -1173,15 +1178,18 @@ class Server:
         if kind == 'routeros':
             entry['ansible_network_os'] = 'community.routeros.routeros'
             entry['ansible_ssh_use_tty'] = False
-        inv['all']['hosts'][name] = entry
-        for g in [kind] + list(groups):
-            grp = inv['all']['children'].setdefault(g, {}) or {}
-            grp.setdefault('hosts', {})
-            if grp['hosts'] is None:
-                grp['hosts'] = {}
-            grp['hosts'][name] = None
-            inv['all']['children'][g] = grp
-        save_inventory(self.cfg, inv)
+        # re-read under the lock: another add may have finished while this one waited for the user
+        with INVENTORY_LOCK:
+            inv = load_inventory(self.cfg)
+            inv['all']['hosts'][name] = entry
+            for g in [kind] + list(groups):
+                grp = inv['all']['children'].setdefault(g, {}) or {}
+                grp.setdefault('hosts', {})
+                if grp['hosts'] is None:
+                    grp['hosts'] = {}
+                grp['hosts'][name] = None
+                inv['all']['children'][g] = grp
+            save_inventory(self.cfg, inv)
         self.audit.write('hosts', summary='added %s %s:%d kind=%s' % (name, address, port, kind), fingerprint=fp)
         extra = ''
         if create_look:

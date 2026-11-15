@@ -1,0 +1,23 @@
+# Package updates on Debian/Ubuntu hosts. Safe upgrade only: no new packages, no removals, no reboot.
+# Says when a reboot is needed; a reboot is its own decision.
+- hosts: linux
+  become: true
+  gather_facts: true
+  tasks:
+    - name: refresh the package lists and install updates (safe upgrade)
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+        upgrade: safe
+        autoremove: false
+      when: ansible_facts.pkg_mgr == 'apt'
+
+    - name: is a reboot needed
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: asm_reboot
+
+    - name: report a pending reboot
+      ansible.builtin.debug:
+        msg: "reboot required (not done: reboot is a separate decision)"
+      when: asm_reboot.stat.exists

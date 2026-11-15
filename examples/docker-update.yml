@@ -1,0 +1,22 @@
+# Pull newer images for a compose project and recreate the containers that changed.
+# A revert can't bring old images back; the compose files themselves aren't touched. Pass checks such as
+# url:http://127.0.0.1:8080/health so a broken container fails the run instead of being kept quietly.
+- hosts: linux
+  become: true
+  gather_facts: false
+  vars:
+    asm_params:
+      project_dir: {type: str, pattern: "^/[A-Za-z0-9/._-]+$"}
+  tasks:
+    - name: pull newer images
+      ansible.builtin.command:
+        cmd: docker compose pull --quiet
+        chdir: "{{ project_dir }}"
+      changed_when: false
+
+    - name: recreate containers whose image changed
+      ansible.builtin.command:
+        cmd: docker compose up -d
+        chdir: "{{ project_dir }}"
+      register: asm_up
+      changed_when: "'Recreate' in asm_up.stderr or 'Started' in asm_up.stderr"

@@ -1,0 +1,24 @@
+# Keep a Windows PC from sleeping for a few hours (it ends by itself; no power settings are changed).
+# A one-time SYSTEM task holds a "system required" request, then exits. Apply with paths=["HKLM:\SOFTWARE\asm-awake"].
+- hosts: windows
+  gather_facts: false
+  tasks:
+    - name: hold the PC awake for 4 hours
+      ansible.builtin.raw: |
+        $d = 'C:\ProgramData\asm-awake'
+        New-Item -ItemType Directory -Force -Path $d | Out-Null
+        $script = @'
+        Add-Type -Namespace W -Name P -MemberDefinition '[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint f);'
+        [W.P]::SetThreadExecutionState([uint32]2147483649) | Out-Null
+        Start-Sleep -Seconds 14400
+        [W.P]::SetThreadExecutionState([uint32]2147483648) | Out-Null
+        '@
+        Set-Content -Path "$d\awake.ps1" -Value $script -Encoding UTF8
+        $a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\ProgramData\asm-awake\awake.ps1'
+        $p = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+        $st = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hours 5) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+        Register-ScheduledTask -TaskPath '\asm-awake\' -TaskName 'awake' -Action $a -Principal $p -Settings $st -Force | Out-Null
+        Start-ScheduledTask -TaskPath '\asm-awake\' -TaskName 'awake'
+        New-Item -Force -Path 'HKLM:\SOFTWARE\asm-awake' | Out-Null
+        Set-ItemProperty -Path 'HKLM:\SOFTWARE\asm-awake' -Name until -Value (Get-Date).AddHours(4).ToString('s')
+        'awake until ' + (Get-Date).AddHours(4).ToString('HH:mm')

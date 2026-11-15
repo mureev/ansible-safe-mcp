@@ -21,6 +21,8 @@ This project brings commit-confirmed to everything Ansible manages, and gives Cl
 3. **Change** with your yes (once per playbook version), under a timer on the host. Kept only after Claude proves,
    over a brand-new connection, that the host still answers and still works.
 
+Ready-made playbooks for common chores are in [`examples/`](examples/README.md).
+
 ## How a change runs
 
 ![Five gates between Claude and your hosts](docs/gates.svg)

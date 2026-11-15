@@ -1,0 +1,7 @@
+# Keep a Mac from sleeping for 4 hours (caffeinate ends by itself; no power settings are changed).
+# Apply with paths=["/var/tmp/asm-awake"].
+- hosts: macos
+  gather_facts: false
+  tasks:
+    - name: hold the Mac awake for 4 hours
+      ansible.builtin.raw: nohup /usr/bin/caffeinate -i -s -t 14400 >/dev/null 2>&1 & date -v+4H "+awake until %H:%M" | tee /var/tmp/asm-awake

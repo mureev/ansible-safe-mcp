@@ -1,0 +1,42 @@
+# Windows Update. Windows refuses to install updates from an SSH session, so this
+# starts a one-time SYSTEM task that searches, downloads and installs software updates (no driver updates, no reboot)
+# and writes C:\ProgramData\asm-updates\last.log. Follow it with:
+#   look hosts=<pc> command="Get-Content C:\ProgramData\asm-updates\last.log -Tail 40"
+# A revert can't uninstall updates; apply still wants paths=[...]: pass HKLM:\SOFTWARE\asm-updates (the run's marker).
+- hosts: windows
+  gather_facts: false
+  tasks:
+    - name: write the update script
+      ansible.builtin.raw: |
+        $d = 'C:\ProgramData\asm-updates'
+        New-Item -ItemType Directory -Force -Path $d | Out-Null
+        $script = @'
+        $log = 'C:\ProgramData\asm-updates\last.log'
+        "started $(Get-Date -Format s)" | Out-File $log -Encoding utf8
+        try {
+          $s = New-Object -ComObject Microsoft.Update.Session
+          $r = $s.CreateUpdateSearcher().Search("IsInstalled=0 and IsHidden=0 and Type='Software'")
+          "found $($r.Updates.Count)" | Out-File $log -Append -Encoding utf8
+          if ($r.Updates.Count -gt 0) {
+            $c = New-Object -ComObject Microsoft.Update.UpdateColl
+            foreach ($u in $r.Updates) { if (-not $u.EulaAccepted) { $u.AcceptEula() }; [void]$c.Add($u); "  $($u.Title)" | Out-File $log -Append -Encoding utf8 }
+            $dl = $s.CreateUpdateDownloader(); $dl.Updates = $c; $dr = $dl.Download()
+            "download result $($dr.ResultCode)" | Out-File $log -Append -Encoding utf8
+            $in = $s.CreateUpdateInstaller(); $in.Updates = $c; $ir = $in.Install()
+            "install result $($ir.ResultCode) reboot=$($ir.RebootRequired)" | Out-File $log -Append -Encoding utf8
+          }
+        } catch { "error $($_.Exception.Message)" | Out-File $log -Append -Encoding utf8 }
+        "finished $(Get-Date -Format s)" | Out-File $log -Append -Encoding utf8
+        '@
+        Set-Content -Path "$d\run.ps1" -Value $script -Encoding UTF8
+        New-Item -Force -Path 'HKLM:\SOFTWARE\asm-updates' | Out-Null
+        Set-ItemProperty -Path 'HKLM:\SOFTWARE\asm-updates' -Name started -Value (Get-Date -Format s)
+
+    - name: start it as SYSTEM, once, now
+      ansible.builtin.raw: |
+        $a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -ExecutionPolicy Bypass -File C:\ProgramData\asm-updates\run.ps1'
+        $p = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+        $st = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hours 3) -StartWhenAvailable
+        Register-ScheduledTask -TaskPath '\asm-updates\' -TaskName 'run' -Action $a -Principal $p -Settings $st -Force | Out-Null
+        Start-ScheduledTask -TaskPath '\asm-updates\' -TaskName 'run'
+        'started: follow C:\ProgramData\asm-updates\last.log'

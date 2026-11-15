@@ -15,6 +15,10 @@
 - A job whose server stopped mid-run (the app restarted when the network changed) is shown as interrupted, with
   a pointer to the guard read, instead of "running" forever. Seen on a Windows PC behind a jump host: its SYSTEM
   task restored it at the deadline.
+- Two host adds waiting on the user at the same time no longer lose one of them: the inventory is re-read and
+  written under a lock.
+- `examples/`: apt updates, Docker Compose updates, Windows Update (through a SYSTEM task), keep-awake for Windows
+  and macOS.
 - `look` across kinds sends only Linux hosts through Ansible; macOS, Windows, RouterOS and OpenWrt are read over
   plain SSH even in a mixed pattern (a guard read over `all` showed a Mac behind a jump host as unreachable).
 - **`backup`**: pull a copy of hosts' configuration into `~/.local/state/ansible-safe-mcp/backups/<host>/<time>/`

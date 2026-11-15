@@ -23,6 +23,8 @@
   task restored it at the deadline.
 - Two host adds waiting on the user at the same time no longer lose one of them: the inventory is re-read and
   written under a lock.
+- **A check returns a job too** when it runs long or its first run waits for the approval dialog (`look check=…
+  wait_s`). A job left "running" hours past its window by a stopped server shows as interrupted.
 - **A long plan returns a job** (`plan wait_s`, default 60): a full converge plan can outlast the ~80 s a Claude
   desktop call waits; follow it with `job status`.
 - **Tool contract, as in mac-terminal-mcp 0.7.1-0.7.2:** every argument described with its default, every tool

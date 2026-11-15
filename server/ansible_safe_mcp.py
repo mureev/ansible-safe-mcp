@@ -1501,7 +1501,11 @@ class Server:
         if a.get('check'):
             if read or command:
                 raise ToolError('give one of check, read or command')
-            return self._look_check(pattern, str(a['check']), int(a.get('timeout') or 180))
+            name, tmo = str(a['check']), int(a.get('timeout') or 180)
+            return self._background('check', 'check %s on %s' % (name, pattern),
+                                    lambda: self._look_check(pattern, name, tmo), a,
+                                    'The check is still running (or waiting for the user to approve this script '
+                                    'version in the dialog on the Mac)')
         if bool(read) == bool(command):
             raise ToolError('give either read (%s), command, or check (a script in checks/<kind>/)' % ', '.join(
                 sorted(set(READS['linux']) | {'logs', 'guard'})))
@@ -1930,34 +1934,39 @@ class Server:
     def t_plan(self, a):
         """A full converge plan can outlast the desktop bridge's ~80 s per call, so it runs in a thread: the answer
         comes back if it is done within wait_s, otherwise a job id to follow with job(status)."""
+        return self._background('plan', str(a.get('playbook', '')), lambda: self._plan_text(a), a,
+                                'The plan is still running (a full converge can take minutes)')
+
+    def _background(self, kind, label, fn, a, still):
+        """Run fn in a thread; answer within wait_s, else a job id (a desktop call waits ~80 s at most)."""
         wait = max(5, min(int(a.get('wait_s', 60) or 60), 70))
         job_id = time.strftime('%m%d%H%M') + secrets.token_hex(2)
         os.makedirs(os.path.join(self.cfg.jobs, job_id), mode=0o700)
-        job = {'id': job_id, 'type': 'plan', 'playbook': str(a.get('playbook', '')), 'targets': [],
+        job = {'id': job_id, 'type': kind, 'playbook': label, 'targets': [],
                'status': 'running', 'started': time.time(), 'pid': os.getpid()}
         self._save_job(job)
         box = {}
 
         def work():
             try:
-                box['text'] = self._plan_text(a)
+                box['text'] = fn()
                 st = 'done'
             except ToolError as e:
-                box['text'], st = 'Plan failed: %s' % e, 'failed'
+                box['err'], st = str(e), 'failed'
             except Exception as e:  # noqa: BLE001 - reported to the caller, not raised in a thread
-                box['text'], st = 'Plan failed: %s: %s' % (type(e).__name__, e), 'failed'
+                box['err'], st = '%s: %s' % (type(e).__name__, e), 'failed'
             j = self._load_job(job_id)
-            j.update(status=st, finished=time.time(), text=box['text'])
+            j.update(status=st, finished=time.time(), text=box.get('text') or 'Failed: %s' % box.get('err'))
             self._save_job(j)
         th = threading.Thread(target=work, daemon=True)
         th.start()
         th.join(wait)
+        if 'err' in box:
+            raise ToolError(box['err'])
         if 'text' in box:
-            if box['text'].startswith('Plan failed: '):
-                raise ToolError(box['text'][len('Plan failed: '):])
             return box['text']
-        return ('The plan is still running (a full converge can take minutes). Job %s: follow it with '
-                'job(id="%s", wait_s=60); it changes nothing either way.' % (job_id, job_id))
+        return ('%s. Job %s: follow it with job(id="%s", wait_s=60); it changes nothing either way.' % (
+            still, job_id, job_id))
 
     def _plan_text(self, a):
         if os.environ.get('ASM_TEST_PLAN_DELAY') and 'slow' in str(a.get('playbook', '')):
@@ -2537,8 +2546,9 @@ class Server:
             raise ToolError('no such job: %s' % job_id)
         # a job runs in a thread of the server that started it; if that server is gone (restarted, the app quit),
         # nobody will finish it: say so instead of "running" forever. The hosts' own timers still revert.
+        stale = time.time() - job.get('started', time.time()) > int(job.get('window') or 600) + 6 * 3600
         if job.get('status') in ('planning', 'awaiting-approval', 'running') and job.get('pid') \
-                and job['pid'] != os.getpid() and not pid_alive(job['pid']):
+                and job['pid'] != os.getpid() and (stale or not pid_alive(job['pid'])):
             job.update(status='interrupted', finished=time.time(),
                        detail='the server that ran this job stopped (restart or the app quit) before it finished. '
                               'Nothing was confirmed: an armed host restores itself at its deadline. '
@@ -2736,22 +2746,24 @@ class Server:
                 except ToolError:
                     continue
                 res = j.get('results') or {}
-                rows.append('%s  %s%s  %s  %s' % (jid, 'plan ' if j.get('type') == 'plan' else '', j['playbook'],
+                rows.append('%s  %s%s  %s  %s' % (jid, (j['type'] + ' ') if j.get('type') in ('plan', 'check')
+                                                  else '', j['playbook'],
                                                   j['status'],
                                                 ', '.join('%s=%s' % (h, r['outcome']) for h, r in sorted(res.items()))))
             return '\n'.join(rows) or 'No jobs yet.'
         job = self._load_job(job_id)
-        if job.get('type') == 'plan':
+        if job.get('type') in ('plan', 'check'):
             if action != 'status':
-                raise ToolError('a plan job only has a status: a plan changes nothing')
+                raise ToolError('a %s job only has a status: it changes nothing' % job['type'])
             wait = max(0, min(int(a.get('wait_s', 0) or 0), 70))
             end = time.time() + wait
             while job['status'] == 'running' and time.time() < end:
                 time.sleep(1)
                 job = self._load_job(job_id)
             if job['status'] == 'running':
-                return 'Plan %s (%s) still running; ask again with wait_s.' % (job_id, job['playbook'])
-            return job.get('text') or job.get('detail') or 'Plan %s: %s' % (job_id, job['status'])
+                return '%s %s (%s) still running; ask again with wait_s.' % (job['type'].capitalize(), job_id,
+                                                                             job['playbook'])
+            return job.get('text') or job.get('detail') or '%s %s: %s' % (job['type'], job_id, job['status'])
         if action == 'status':
             wait = max(0, min(int(a.get('wait_s', 0)), 70))
             end = time.time() + wait
@@ -3029,6 +3041,8 @@ TOOLS = [
          'command': S('a read-only shell command (PowerShell on Windows, RouterOS CLI on routers), run as the look '
                       'account'),
          'check': S('a check script name from checks/<kind>/, e.g. docker or estate-audit'),
+         'wait_s': I('check=: seconds to wait for the answer (the first run of a script version waits for the '
+                     'user\'s dialog) before returning a job id (5-70). Default 60'),
          'unit': S('read=logs: a systemd unit, e.g. nginx'),
          'container': S('read=logs: a container name'),
          'since': S('read=logs: journalctl --since value, e.g. "1 hour ago"'),

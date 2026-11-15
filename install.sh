@@ -18,8 +18,16 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 DEST="$HOME/.config/claude-mcp/ansible-safe-mcp"
 APP="$DEST/app"
 VENV="$DEST/venv"
-PROJECT="${ASM_PROJECT:-$HOME/ansible-safe}"
+# the project and masking settings: from the environment, else what the Claude entry already has, else defaults
+PROJECT="${ASM_PROJECT:-}"
 CFG="${CLAUDE_CONFIG:-$HOME/Library/Application Support/Claude/claude_desktop_config.json}"
+if [ -z "$PROJECT" ]; then
+  PROJECT=$(CFG="$CFG" /usr/bin/python3 -I -c 'import json,os
+try: print(json.load(open(os.environ["CFG"]))["mcpServers"]["ansible-safe"]["env"]["ASM_PROJECT"])
+except Exception: pass' 2>/dev/null || true)
+  PROJECT="${PROJECT:-$HOME/ansible-safe}"
+fi
+export ASM_MASK_DOMAINS="${ASM_MASK_DOMAINS:-}"
 MODE="${1:-install}"; MODE="${MODE#--}"
 
 say() { printf '\033[1m%s\033[0m\n' "$*"; }
@@ -69,9 +77,14 @@ servers = cfg.setdefault("mcpServers", {})
 before = sorted(servers)
 if action == "set":
     app, venv = os.environ["APP"], os.environ["VENV"]
-    entry = {"command": f"{venv}/bin/python", "args": ["-I", "-B", f"{app}/server/ansible_safe_mcp.py"],
-             "env": {"ASM_PROJECT": os.environ["PROJECT"], "ASM_COLLECTIONS": f"{app}/collections",
-                     "ASM_ANSIBLE_BIN": f"{venv}/bin"}}
+    old_env = (servers.get(name) or {}).get("env") or {}
+    env = {"ASM_PROJECT": os.environ.get("PROJECT") or old_env.get("ASM_PROJECT")
+           or os.path.expanduser("~/ansible-safe"),
+           "ASM_COLLECTIONS": f"{app}/collections", "ASM_ANSIBLE_BIN": f"{venv}/bin"}
+    masks = os.environ.get("ASM_MASK_DOMAINS") or old_env.get("ASM_MASK_DOMAINS", "")
+    if masks:
+        env["ASM_MASK_DOMAINS"] = masks
+    entry = {"command": f"{venv}/bin/python", "args": ["-I", "-B", f"{app}/server/ansible_safe_mcp.py"], "env": env}
     what = "unchanged" if servers.get(name) == entry else ("replaced" if name in servers else "added")
     servers[name] = entry
 else:

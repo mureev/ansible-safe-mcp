@@ -246,3 +246,9 @@ the collection.
 | **0.2** ✓ | `hands` (one-off changes); OpenWrt; apply as a job that answers while you decide; the collection on Galaxy |
 | **0.3** | Windows and macOS hosts; jump hosts |
 | 0.4 | Every run inside a macOS sandbox (the [mac-terminal](https://github.com/mureev/mac-terminal-mcp) fence); Touch ID approvals |
+
+## Public repository
+
+This repository is public. Commits, comments, changelog entries and docs describe the server in generic terms only:
+no details of any real deployment (host names, addresses, real port numbers, network layout, incident stories) and
+no links to private agent sessions. Reread the message and the diff before committing.

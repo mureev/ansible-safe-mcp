@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Fix:** `hosts add` replaces only the pinned keys of the same address and port.
+
 ## 0.3.1 — 2026-11-15
 
 - **Checks**: `look check=<name>` runs a read-only script of your own from `checks/<kind>/` (Linux, macOS and Synology

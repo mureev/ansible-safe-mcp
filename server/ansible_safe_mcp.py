@@ -1354,9 +1354,10 @@ class Server:
             return 'Not added: the user declined (%s).' % how
         with open(kh) as f:
             new_keys = f.read()
+        # replace only this address:port's pins (a bare address means port 22)
         host_tag = address if port == 22 else '[%s]:%d' % (address, port)
         with open(self.cfg.known_hosts) as f:
-            kept = [line for line in f if line.split(' ', 1)[0] not in (address, host_tag)]
+            kept = [line for line in f if host_tag not in line.split(' ', 1)[0].split(',')]
         with open(self.cfg.known_hosts, 'w') as f:
             f.writelines(kept)
             f.write(new_keys)

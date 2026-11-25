@@ -1931,7 +1931,7 @@ class Server:
         if doc is None:
             raise ToolError('the plan could not run: %s' % err[-2500:])
         plan = summarize_plan(doc)
-        if require_success and rc != 0:
+        if require_success and (rc != 0 or any(s['unreachable'] or s['failed'] for s in plan.values())):
             raise ToolError('the dry run failed; nothing was changed.\n\n%s' % plan_text(plan))
         return plan
 

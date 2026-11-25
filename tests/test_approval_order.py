@@ -118,6 +118,14 @@ class ApprovalOrderTest(unittest.TestCase):
             with self.assertRaisesRegex(asm.ToolError, "nothing was changed"):
                 server._plan("/test.yml", "web", {}, require_success=True)
 
+    def test_apply_stops_for_unreachable_host_even_with_zero_exit(self):
+        server = asm.Server.__new__(asm.Server)
+        server.cfg = SimpleNamespace(state=self.server.cfg.project)
+        report = {"tasks": [{"hosts": {"web": {"status": "unreachable", "msg": "no connection"}}}]}
+        with patch.object(asm, "run_playbook", return_value=(report, "", 0)):
+            with self.assertRaisesRegex(asm.ToolError, "UNREACHABLE"):
+                server._plan("/test.yml", "web", {}, require_success=True)
+
 
 if __name__ == "__main__":
     unittest.main()

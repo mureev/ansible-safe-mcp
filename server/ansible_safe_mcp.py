@@ -1139,11 +1139,12 @@ READS = {
 INSTRUCTIONS = """ansible-safe-mcp runs Ansible on the user's hosts. Changes undo themselves unless confirmed.
 
 Workflow: hosts (list) -> look (read state; free, unprivileged) -> playbook (write a .yml under playbooks/) ->
-plan (check mode + diff; free) -> apply (asks the user once per playbook version, then runs under an on-host revert
+apply (asks once per playbook version before the remote dry run on Linux, then runs under an on-host revert
 timer and keeps the change only after a fresh connection proves the host works) -> job (follow long runs).
+Use plan for a free, read-only diff when the user wants to see it before approving.
 For a genuine one-off, hands writes the steps as a playbook in oneoffs/ and runs it the same way.
 
-Rules: show the user the plan before apply. Declare inputs that change per run as params in the first play's
+Rules: describe the change and its scope before apply. Declare inputs that change per run as params in the first play's
 vars.asm_params (e.g. asm_params: {client: {type: str, pattern: '^[a-z0-9-]+$'}}) so one approval covers them.
 Playbooks may not use lookups, delegate_to, localhost, connection/user variables, local plugins or check_mode: false:
 the lint guard refuses them because they run on the user's Mac. Never put secrets in playbooks. If apply says NOT
@@ -1921,7 +1922,7 @@ class Server:
             raise ToolError('tags work on Linux hosts (Ansible runs the play there); the other kinds run commands')
         return path, rel, limit, params, targets, tag_args
 
-    def _plan(self, path, limit, params, tag_args=()):
+    def _plan(self, path, limit, params, tag_args=(), *, require_success=False):
         d = scratch(self.cfg, 'plan')
         vf = os.path.join(d, 'vars.yml')
         write_vars(vf, 'change', params)
@@ -1929,7 +1930,10 @@ class Server:
         shutil.rmtree(d, ignore_errors=True)
         if doc is None:
             raise ToolError('the plan could not run: %s' % err[-2500:])
-        return summarize_plan(doc)
+        plan = summarize_plan(doc)
+        if require_success and rc != 0:
+            raise ToolError('the dry run failed; nothing was changed.\n\n%s' % plan_text(plan))
+        return plan
 
     # ---- tool: plan
     def t_plan(self, a):
@@ -2032,17 +2036,21 @@ class Server:
                                 'or folders the commands change. Only those are snapshotted and restored on a revert.')
             if any('{{' in c or '{%' in c for _, c in routeros_commands(path)):
                 raise ToolError('Windows playbooks run their raw commands as written (no templating): remove {{ }}')
+        inventory = hosts_of(load_inventory(self.cfg))
+        target_inventory = {host: inventory[host] for host in targets}
         h = version_hash(self.cfg, rel, targets, tag_args)
         job_id = time.strftime('%m%d%H%M') + secrets.token_hex(2)
         os.makedirs(os.path.join(self.cfg.jobs, job_id), mode=0o700)
         job = {'id': job_id, 'playbook': rel, 'targets': targets, 'version': h, 'params': params, 'window': window,
-               'started': time.time(), 'status': 'planning', 'asked': False, 'kind': kind, 'pid': os.getpid(),
+               'started': time.time(), 'status': 'preparing', 'asked': False, 'kind': kind, 'pid': os.getpid(),
                'tags': tag_args}
         self._save_job(job)
-        args = (job_id, path, rel, limit, params, targets, window, checks, extra_paths, extra_services, h)
+        ready = threading.Event()
+        args = (job_id, path, rel, params, targets, window, checks, extra_paths, extra_services, h, target_inventory,
+                str(a.get('why') or '').strip()[:280], ready)
         t = threading.Thread(target=self._apply_flow, args=args, daemon=True)
         t.start()
-        t.join(timeout=max(0, min(int(a.get('wait_s', 55)), 70)))
+        ready.wait(timeout=max(0, min(int(a.get('wait_s', 55)), 70)))
         return self._job_text(job_id)
 
     def _set(self, job_id, **kw):
@@ -2051,33 +2059,55 @@ class Server:
         self._save_job(job)
         return job
 
-    def _apply_flow(self, job_id, path, rel, limit, params, targets, window, checks, extra_paths, extra_services, h):
+    def _apply_flow(self, job_id, path, rel, params, targets, window, checks, extra_paths, extra_services, h,
+                    target_inventory, why, ready):
         try:
-            kind = self._load_job(job_id)['kind']
+            job = self._load_job(job_id)
+            kind, tags = job['kind'], job['tags']
+            plan = None
             if kind == 'routeros':
-                plan, plan_txt = None, routeros_plan_text(path, targets)
+                preview = routeros_plan_text(path, targets)
             elif kind == 'openwrt':
-                plan, plan_txt = None, openwrt_plan_text(path, targets)
+                preview = openwrt_plan_text(path, targets)
             elif kind == 'windows':
-                plan, plan_txt = None, windows_plan_text(path, targets)
+                preview = windows_plan_text(path, targets)
             elif kind in POSIX_SSH:
-                plan, plan_txt = None, macos_plan_text(path, targets, 'a launchd daemon' if kind == 'macos'
-                                                       else 'a systemd timer')
+                preview = macos_plan_text(path, targets, 'a launchd daemon' if kind == 'macos' else 'a systemd timer')
             else:
-                plan = self._plan(path, limit, params, self._load_job(job_id).get('tags') or [])
-                unreachable = [x for x in targets if (plan.get(x) or {}).get('unreachable')]
-                if unreachable:
-                    self._set(job_id, status='failed', error='the plan could not reach %s; nothing was changed.\n\n%s'
-                              % (', '.join(unreachable), plan_text(plan)))
-                    return
-                plan_txt = plan_text(plan)
+                preview = ('The remote dry run will run after approval to check the change and discover rollback '
+                           'paths. Use the Plan tool first if you want to review its diff before approving.')
+            details = [why] if why else []
+            for label, values in (('Tags', tags), ('Checks', checks), ('Extra rollback paths', extra_paths),
+                                  ('Services to restart on rollback', extra_services)):
+                if values:
+                    details.append('%s: %s' % (label, ', '.join(values)[:320]))
+            preview = '\n'.join(details + [preview])
             if not self.approvals.approved(h, rel, targets):
-                self._set(job_id, status='awaiting-approval', plan=plan_txt[:6000])
-            ok, asked, how = self._approve(rel, targets, h, params, window, plan_txt)
+                self._set(job_id, status='awaiting-approval', plan=preview[:6000])
+                ready.set()
+            ok, asked, how = self._approve(rel, targets, h, params, window, preview)
             if not ok:
                 self._set(job_id, status='declined', asked=True, error=how)
                 self.audit.write('apply', summary='%s declined (%s)' % (rel, how), version=h[:12])
                 return
+
+            def verify_version():
+                findings = lint.lint_tree(self.cfg.project, ('playbooks', 'roles', 'oneoffs'))
+                if findings:
+                    raise ToolError('Lint refuses the project, so nothing runs:\n' + lint.format_findings(findings))
+                check_inventory(self.cfg)
+                current = hosts_of(load_inventory(self.cfg))
+                if version_hash(self.cfg, rel, targets, tags) != h or any(
+                        current.get(host) != target_inventory[host]
+                        or target_inventory[host].get('asm_kind', 'linux') != kind for host in targets):
+                    raise ToolError('the approved playbook or target inventory changed; submit a new apply.')
+
+            verify_version()
+            if kind not in SERVER_GUARDED:
+                self._set(job_id, status='planning', asked=asked)
+                plan = self._plan(path, ':'.join(targets), params, tags, require_success=True)
+                self._set(job_id, plan=plan_text(plan)[:6000])
+                verify_version()
             self._set(job_id, status='running', asked=asked)
             self.audit.write('apply', summary='%s on %s (job %s)' % (rel, ','.join(targets), job_id), version=h[:12],
                              asked=asked, params=params)
@@ -2138,6 +2168,8 @@ class Server:
             self._finish(job_id, proc)
         except Exception as e:
             self._set(job_id, status='failed', error='%s: %s' % (type(e).__name__, e))
+        finally:
+            ready.set()
 
     def _kind_of(self, targets):
         hs = hosts_of(load_inventory(self.cfg))
@@ -2548,7 +2580,7 @@ class Server:
         # a job runs in a thread of the server that started it; if that server is gone (restarted, the app quit),
         # nobody will finish it: say so instead of "running" forever. The hosts' own timers still revert.
         stale = time.time() - job.get('started', time.time()) > int(job.get('window') or 600) + 6 * 3600
-        if job.get('status') in ('planning', 'awaiting-approval', 'running') and job.get('pid') \
+        if job.get('status') in ('preparing', 'planning', 'awaiting-approval', 'running') and job.get('pid') \
                 and job['pid'] != os.getpid() and (stale or not pid_alive(job['pid'])):
             job.update(status='interrupted', finished=time.time(),
                        detail='the server that ran this job stopped (restart or the app quit) before it finished. '
@@ -2634,6 +2666,12 @@ class Server:
         jd = os.path.join(self.cfg.jobs, job_id)
         v = job.get('version', '')[:12]
         st = job['status']
+        if st == 'preparing':
+            return 'Job %s: preparing %s on %s. Follow it with job(id="%s", wait_s=50).' % (
+                job_id, job['playbook'], ', '.join(job['targets']), job_id)
+        if st == 'planning' and 'kind' in job:
+            return 'Job %s: approved, running the read-only dry run for %s on %s. Follow it with job(id="%s", wait_s=50).' % (
+                job_id, job['playbook'], ', '.join(job['targets']), job_id)
         if st == 'planning':
             return 'Job %s: planning %s on %s. Follow it with job(id="%s", wait_s=50).' % (
                 job_id, job['playbook'], ', '.join(job['targets']), job_id)
@@ -2732,7 +2770,7 @@ class Server:
                     'touch: paths=[...] (files and folders they create, change or delete; they are snapshotted and '
                     'put back on a revert) and services=[...] to restart. Then call hands again or apply %s.' %
                     (rel, rel))
-        return self.t_apply({'playbook': rel, 'window': a.get('window', '10m'), 'checks': a.get('checks'),
+        return self.t_apply({'playbook': rel, 'why': why, 'window': a.get('window', '10m'), 'checks': a.get('checks'),
                              'paths': a.get('paths'), 'services': a.get('services'), 'wait_s': a.get('wait_s', 60)})
 
     # ---- tool: job
@@ -2768,7 +2806,7 @@ class Server:
         if action == 'status':
             wait = max(0, min(int(a.get('wait_s', 0)), 70))
             end = time.time() + wait
-            while job['status'] in ('planning', 'awaiting-approval', 'running') and time.time() < end:
+            while job['status'] in ('preparing', 'planning', 'awaiting-approval', 'running') and time.time() < end:
                 time.sleep(1)
                 job = self._load_job(job_id)
             return self._job_text(job_id)
@@ -2945,7 +2983,7 @@ try {
                 j = self._load_job(jid)
             except ToolError:
                 continue
-            if j['status'] in ('planning', 'awaiting-approval', 'running'):
+            if j['status'] in ('preparing', 'planning', 'awaiting-approval', 'running'):
                 running.append('%s %s%s on %s' % (jid, 'plan of ' if j.get('type') == 'plan' else '', j['playbook'],
                                                   ','.join(j['targets']) or '-'))
         lines.append('running jobs: ' + ('; '.join(running) if running else 'none'))
@@ -3081,8 +3119,8 @@ TOOLS = [
                      'openWorldHint': False}},
     {'name': 'plan', 'title': 'Plan',
      'description': 'Check mode with diff: what a playbook would change on each host, what would be snapshotted, '
-                    'and whether this playbook version is already approved. Changes nothing and never asks. Show it '
-                    'to the user before apply. A long plan returns a job id: follow it with job(status).'
+                    'and whether this playbook version is already approved. Changes nothing and never asks. Use it '
+                    'when the user wants a diff before approving. A long plan returns a job id: follow it with job(status).'
                     + UNTRUSTED,
      'inputSchema': {'type': 'object', 'properties': {
          'playbook': S('project-relative path, e.g. playbooks/site.yml'),
@@ -3096,11 +3134,13 @@ TOOLS = [
      'description': 'Run a playbook for real under the safety net: each host arms a revert timer, the change runs, '
                     'then a fresh connection and the checks must pass before the change is kept; otherwise the host '
                     'puts itself back. The first run of a playbook version (content, everything it pulls in, tags, '
-                    'hosts) asks the user in a dialog on the Mac; unchanged versions rerun without asking. Never ask '
+                    'hosts) asks the user in a dialog on the Mac before the remote dry run on Linux; unchanged versions '
+                    'rerun without asking. Never ask '
                     'the user to approve in the chat. Waits up to wait_s, then returns a job id.' + UNTRUSTED,
      'inputSchema': {'type': 'object', 'properties': {
          'playbook': S('project-relative path, e.g. playbooks/site.yml'),
          'limit': S('host, group or pattern. Default: the play\'s hosts'),
+         'why': S('short summary of the change for the approval dialog. Optional'),
          'params': {'type': 'object', 'description': 'values for the playbook\'s declared asm_params'},
          'tags': TAGS, 'skip_tags': SKIP_TAGS,
          'window': S('time to confirm before the host reverts, e.g. 90s or 30m. Default 10m'),

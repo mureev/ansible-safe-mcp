@@ -31,8 +31,13 @@ def rpc(method, params=None):
             return msg
 
 
-def tool(_tool, **args):
+def tool(_tool, *, wait_for_result=True, **args):
     r = rpc("tools/call", {"name": _tool, "arguments": args})["result"]
+    if _tool in ('apply', 'hands') and wait_for_result and not r['isError']:
+        text = r['content'][0]['text']
+        if 'Follow it with job(' in text or 'follow with job(' in text:
+            jid = re.search(r'Job (\w+)', text).group(1)
+            return tool('job', id=jid, wait_s=70)
     return r['content'][0]['text'], r['isError']
 
 
@@ -157,9 +162,9 @@ check('edited playbook asks again; a decline changes nothing', asked() == 3 and 
 os.remove(os.path.join(W, 'DENY'))
 
 open(os.path.join(W, 'SLOW'), 'w').close()
-t, e = tool('apply', playbook='playbooks/motd.yml', params={'message': 'slow'}, wait_s=3)
+t, e = tool('apply', playbook='playbooks/motd.yml', params={'message': 'slow'}, wait_s=3, wait_for_result=False)
 jid = re.search(r'Job (\w+)', t).group(1)
-check('apply answers while the user is still deciding', 'waiting for the user to approve' in t or 'planning' in t, t)
+check('apply answers while the user is still deciding', 'waiting for the user to approve' in t, t)
 t, e = tool('job', id=jid, wait_s=60)
 check('...and the job finishes once approved', 'CONFIRMED' in t and open('/etc/asm-motd').read() == 'slow\n', t)
 os.remove(os.path.join(W, 'SLOW'))

@@ -17,7 +17,7 @@ on every Save & Apply. Linux, Windows and macOS don't have it at all.
 This project brings commit-confirmed to everything Ansible manages, and gives Claude an MCP server built around it:
 
 1. **Look** freely. Reads run as an unprivileged account that can't change the system.
-2. **Plan** freely. `--check --diff` shows exactly what would change.
+2. **Plan** freely when you want a separate diff. On Linux, `apply` runs its own `--check --diff` after approval.
 3. **Change** with your yes (once per playbook version), under a timer on the host. Kept only after Claude proves,
    over a brand-new connection, that the host still answers and still works.
 
@@ -35,6 +35,10 @@ approve_also: [../stacks]
 ## How a change runs
 
 ![Five gates between Claude and your hosts](docs/gates.svg)
+
+On Linux the native dialog appears after local validation of the requested playbook and hosts, before the remote
+dry run. Agents can pass `why` to show the purpose in the dialog. The dry run must pass before the guard is armed.
+If you want to see the remote diff before you decide, run the read-only `plan` first.
 
 The timer runs on the target, against the target's own clock. If Claude's session ends, your laptop sleeps, or the
 change kills SSH, the host still undoes the change. Arming is checked before anything is applied: no armed timer, no
@@ -89,7 +93,7 @@ change.
 | `backup` | Pull a copy of config into the server's state folder (not the project repo): RouterOS `/export terse`, OpenWrt `sysupgrade -b` and `uci export`, the paths you list on Linux, macOS and Windows (registry keys as `.reg`). Files are 0600; the tool returns path, size and sha256, never the contents. | no |
 | `playbook` | Create, edit and list playbooks in the project folder (a git repo). Lint runs on every save. | no |
 | `plan` | `--check --diff` for a playbook and a host list: what would change, per host. | no |
-| `apply` | Run a playbook for real, under the guard: arm, apply, verify over a fresh connection, confirm or let it revert. | **once per playbook version** |
+| `apply` | Run a playbook under the guard. On Linux, do the dry run after approval, then arm, apply and verify over a fresh connection. | **once per playbook version** |
 | `hands` | A one-off change ("remote hands"): Claude's steps become a generated playbook under the same guard, saved to `oneoffs/`. | **yes, each time** |
 | `job` | Follow a running change; extend its window; revert it now. | no |
 | `status` | Pending windows, recent reverts, what the lint guard refused, and the audit log. | no |
@@ -119,7 +123,7 @@ panel's settings, the full Docker picture. `checks/<kind>/<name>.sh` (linux, mac
 |---|---|
 | A change locks you out | The on-host revert timer. Confirmation needs a **new** connection, not a reused one: Ansible keeps SSH connections open, and an old connection can survive a firewall change that blocks every new one. |
 | Claude changes things you didn't approve | Two accounts per host. `look` uses one that can't change the system: on Linux no sudo beyond a short list of read commands (`/etc/sudoers.d/ansible-safe-look`: docker ps/logs/inspect/images/stats, journalctl `--no-pager`), checked with `visudo` before it is installed, and not in the `docker` group (Docker's socket is root in disguise); a read-only group on RouterOS. Only `apply` and `hands` use the change account, and only with your yes. |
-| Approving so often you stop reading | You approve a **playbook version**, not a run: the hash of the playbook, the files it can pull in, the roles, and the exact hosts. An unchanged version reruns without asking; any change asks again, with the plan. Playbooks declare their parameters (`asm_params` in the first play's vars), so "add a VPN user called X" is approved once, not once per user. Parameter values are checked against the declaration, may not contain template braces, and reach Ansible marked `!unsafe`, so they are never evaluated. |
+| Approving so often you stop reading | You approve a **playbook version**: the hash of the playbook, its tracked inputs, the roles, and the exact hosts. An unchanged version reruns without asking. On Linux the dialog shows the requested scope before the remote dry run. Playbooks declare their parameters (`asm_params` in the first play's vars), so "add a VPN user called X" is approved once, not once per user. Parameter values are checked against the declaration, may not contain template braces, and reach Ansible marked `!unsafe`, so they are never evaluated. |
 | Someone else edits the approvals | Each approval is signed with a key kept in the macOS Keychain, which sandboxed shells can't read. An approval written by anything but this server doesn't verify. |
 | Someone else edits the inventory | The server refuses to run if the inventory holds anything its `hosts` tool wouldn't write: a connection variable, a jump command that differs from the one it would generate. Your own variables may sit in `inventory/group_vars` and `host_vars`, but no `ansible_*` or `asm_*` key there. |
 | Hosts behind a bastion or a reverse tunnel | Add the bastion with `kind="jump"` (its own account, key and pinned host key), then hosts with `jump=<name>`. The server writes the `ProxyCommand`; jump hosts are never targets. |

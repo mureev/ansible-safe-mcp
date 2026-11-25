@@ -11,7 +11,7 @@
 
 <img src="docs/hero.svg" width="760" alt="On the host's clock: arm at 21:04, apply, SSH lost at 21:05, deadline at 21:14. With block/rescue the undo waits on the controller and the host is still changed at the deadline. With ansible-safe-mcp the undo was armed on the host for a 10-minute window, and the host is restored at the deadline.">
 
-Claude writes the playbook, shows you the diff, and runs it under a timer that lives on the host.<br>
+Claude writes the playbook and can show you a diff. On Linux, the approval dialog comes before the remote dry run and the change runs under a timer that lives on the host.<br>
 To install it, give your agent this link:
 
 ```

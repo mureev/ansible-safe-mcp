@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Approval first on Linux:** `apply` shows the native dialog after local validation and returns its job ID as
+  soon as the dialog is pending. The remote dry run and rollback snapshot discovery follow approval. A failing
+  dry run or a changed playbook or target inventory stops the apply before the guard is armed.
 - **Fix:** `hosts add` replaces only the pinned keys of the same address and port.
 
 ## 0.3.1 — 2026-11-15
